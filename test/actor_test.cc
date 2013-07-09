@@ -1,7 +1,7 @@
 #include "./super_quick_test.h"
 
-#include "./actor.h"
-#include "./director.h"
+#include "../src/actor.h"
+#include "../src/director.h"
 
 using namespace ActorModel;
 
