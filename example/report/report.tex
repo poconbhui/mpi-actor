@@ -1,0 +1,2765 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage{epcc}
+\usepackage{graphics}
+
+\usepackage{verbatim}
+\usepackage{listings}
+\lstset{language=C++}
+\lstset{basicstyle=\ttfamily\footnotesize,frame=single}
+
+\lstnewenvironment{code}[1][]%
+{
+    \noindent
+    \minipage{\linewidth} 
+    \vspace{0.5\baselineskip}
+    \lstset{#1}
+}
+{\endminipage}
+
+\lstnewenvironment{longcode}[1][]%
+{
+    \noindent
+    \vspace{0.5\baselineskip}
+    \lstset{#1}
+}
+{}
+
+\newcommand{\term}[1]{\texttt{#1}}
+
+
+\begin{document}
+
+\title{
+    Simulations of the Effect of Blue Nose Disease on a Population of Frogs\\
+    \Large{An Actor Model Implementation}
+}
+\author{b5fe-1fde7d}
+\date{\today}
+
+\makeEPCCtitle
+
+\thispagestyle{empty}
+
+\newpage
+
+\pagenumbering{roman}
+
+\tableofcontents
+
+\newpage
+\pagenumbering{arabic}
+
+
+\section{Introduction}
+A model has been devised by a group of biologists to simulate the
+spread of "Blue Nose Disease" through a population of frogs.
+A parallel simulation of this model was implemented
+using the "actor model."
+This is done by first implementing a parallel actor model framework
+using C\verb!++! and MPI, and then by writing the simulation
+using this framework.
+
+In writing the actor model framework, much of the design was informed
+by considering the population simulation that was to be built with it.
+Indeed, as the simulation was being written, some interfaces
+and implementation details of the actor framework were reconsidered
+and rewritten to allow programs built using it to be
+more robust and more easily implemented.
+However, at all times, care was taken to ensure that the actor framework
+remained as generally applicable as possible.
+
+In implementing both the framework and the simulation,
+a test driven development approach was taken to help with ensuring
+the correctness of code and to aid in later debugging and refactoring.
+However, as parallel programming is hard and in particular,
+asynchronous programming, it is difficult to ensure that the tests
+written are actually correct.
+Further difficulty is derived from the fact that some aspects of the code
+can only be tested indirectly, as a programmer may lose access to certain
+details they would like to test.
+An example is testing whether an actor is, indeed, capable of giving
+birth to actors, and that those actors continue to operate
+and give birth after the original parent is dead.
+This can be tested by getting these children to message some test
+class inheriting \term{Actor} and
+by measuring increasing loads on the \term{Director},
+which will be introduced later as the user interface for
+configuring and launching actor model instances.
+However, this is only indirect evidence that the expected behaviour
+is being carried out, and there may be many bugs hiding in the gaps
+in our observations.
+
+\newpage
+\section{Actor Model Implementation}
+The goal for our implementation of the actor model is to make the
+definition of new actors as simple as possible for users,
+and to make the launching of parallel actor model jobs as
+straightforward as possible.
+We aim to allow the user to specify the number of processes
+they would like to run the model on and balance the running
+of any number of actor across these processes.
+
+To define a type of actor for use in the model, a user
+will inherit from the \term{Actor} class.
+They may then define some initialization procedures by
+overloading the class constructor,
+a main function to be run in a loop by the \term{Director} by
+overloading the \term{main} function
+and some clean up procedures by
+overloading the class destructor.
+The \term{Actor} class provides interfaces to the inheriting class
+to perform necessary actions such as sending and receiving messages,
+giving birth to new actors
+and dying.
+
+To run an instance of an actor model program,
+a user creates an instance of a \term{Director}.
+The user then registers the types of actors that can be born in
+the simulation with the \term{Director}.
+The user may then add an initial actor to the simulation,
+receiving a pointer to that actor,
+and may then use this actor to create and initialize
+new actors in the system
+and also retreive information from the system.
+
+The framework makes extensive use of MPI\_Bsend.
+As such, a buffer must be allocated and provided to MPI.
+This has been left to the user to do.
+It would be trivial to abstract the MPI library away completely,
+but this was not done here.
+It is also required of the user to ensure MPI\_Init and MPI\_Finalize
+are called in the appropriate places, and importantly, that the
+destructor of any directors be called before MPI\_Finalize is
+called.
+
+
+\subsection{Distributed Factories}
+In our design, we require that many classes inheriting from the
+\term{Actor} base class may be initialized using a request sent as an MPI
+message,
+and in particular, that one process may specify the particular
+subclass they wish to be initialized and on which process.
+
+To achieve this, we create a general \term{Factory} class which can be used
+to enumerate subclasses by registering them with the factory.
+A process can then request a subclass be initialized by requesting
+it by number.
+This, however, requires that the subclasses be registered in the same
+order on every process.
+
+The \term{Factory} class is then extended to a \term{DistributedFactory}
+class, which allows processes to send requests that a particular
+subclass be initialized on a particular process.
+A process will receive this request by first querying whether there
+are any outstanding requests, and then by generating the
+requested actor if there are.
+To connect instances of the \term{DistributedFactory} together,
+a collective routine is used to create a new communicator,
+so connected distributed factories must be initialized simultaneously
+on the required processes.
+
+When an instance of a subclass is initialized,
+we assume it remains on the same process.
+This allows us to simplify the management of running actors
+and their communications.
+It also allows us to create a global id for that actor,
+providing a unique identifier and specifying the
+process on which they live.
+This global id can then be used to easily target specific actors
+when sending messages.
+This assumption also allows us to create this global id on the
+requesting process.
+The id can be returned immediately from the request function
+so the requester can immediately identify the child class.
+
+\begin{code}[caption=DistributedFactory Example]
+DistributedFactory<BaseClass> df;
+df.register_child<SubClass>();
+
+int rank;
+MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+if(rank == 0) {
+    Id child_id = df.request_distributed_child<SubClass>();
+    std::cout << "Requested Id: " << child_id.id << std::endl;
+}
+
+// Ensure the request has gone out
+MPI_Barrier(comm);
+
+if(df.is_child_waiting()) {
+    // Not necessarily rank 0!
+
+    DistributedFactory<BaseClass>::Child child =
+        df.generate_requested_child();
+
+    // child.id should contain the same value as child_id above
+    std::cout << "Retreived Id: " << child.id << std::endl;
+
+
+    /**
+     * base should be a pointer to an instance of SubClass,
+     * casted to BaseClass.
+     * If do_something is an overloaded virtual function,
+     * this should execute SubClass::do_something().
+     */
+    BaseClass *base = child.child;
+    base->do_something();
+}
+\end{code}
+
+
+\subsection{Actors}
+As mentioned, the \term{Actor} class is the base class
+to be inherited by all user defined actors.
+To define a new \term{Actor}, the child class must overload the
+\term{main} function.
+This is function will be executed repeatedly and should be used
+to define the behavior of the actor.
+Actors may also overload the constructors and destructors to manage
+their data.
+However, these shouldn't be used to message other actors
+or to spawn new actors.
+New actors are free to use member variables to stora data or state
+and add member functions to their class, which may be accessed by users
+in the case an actor is accessible.
+
+The \term{Actor} class comes with several useful functions.
+These include functions to message other actors and receive messages,
+give birth to other actors, and to die.
+
+A \term{Message} class is used to send and receive messages.
+This class also simplifies the management of message memory for scalar
+data types, but also allows for arrays to be sent as data.
+An actor can send a message to any actor it knows the id of.
+A message can be composed of some message data and a message tag.
+This is different from the usual MPI tag, as the MPI tag is actually
+used to identify actors, so this tag is sent ahead in a separate message
+ad metadata.
+When sending and accessing data, templating is used to simplify the process.
+Data is sent and received between actors as an MPI\_BYTE type.
+As such, this may not be portable to heterogenous systems.
+It is conceivable that a sort of factory scheme could be used to
+send and receive MPI messages with an appropriate MPI datatype.
+This, however, was not implemented, and the more straightworward solution
+was chosen as the target architecture was not heterogenous.
+
+\begin{longcode}[caption=Example Actor]
+class SubActorManager: public Actor {
+    SubActorManager():
+        _sub_actor_list(NULL),
+        _sub_actor_list_size(0)
+    {}
+
+    ~SubActorManager() {
+        delete[] _sub_actor_list;
+    }
+
+    // Some easily identifiable message tags
+    enum {
+        CREATE_SUB_ACTOR_LIST,
+        GET_SUB_ACTOR_LIST,
+        DIE
+    }
+
+    // The main routine to be executed repeatedly
+    void main(void) {
+        Message message;
+
+        /**
+         * get_message(Message *message) will return true if
+         * there is a message waiting and set message
+         * appropriately.
+         */
+        if(get_message(&message)) {
+
+            // Message dependent actions.
+            switch(message.tag()) {
+                case CREATE_SUB_ACTOR_LIST: {
+
+                    // message.data<int>() will return the data
+                    // the message has received casted to an int.
+                    _sub_actor_list_size = message.data<int>();
+
+                    _sub_actor_list = new Id[_sub_actor_list_size];
+                    for(int i=0; i<_sub_actor_list_size; i++) {
+
+                        // give_birth<SubActor>() will request
+                        // a child of type SubActor is born
+                        // on some process.
+                        // The Id of this child is immediately
+                        // returned.
+                        _sub_actor_list[i] = give_birth<SubActor>();
+
+                        SubActor::InitData init_data = ...
+
+                        // send_message<type>(id, type data, tag)
+                        // will send the data in data to actor id
+                        // with the tag tag.
+                        send_message<SubActor::InitData>(
+                            _sub_actor_list[i],
+                            init_data,
+                            SubActor::INIT
+                        );
+                    }
+                } break;
+
+                case GET_SUB_ACTOR_LIST: {
+                    Id reply_id = message.data<Id>();
+
+                    // If a length parameter is specified after
+                    // the data is passed in, it is expected
+                    // that a pointer to the data has been passed
+                    // in and the number of elements specified
+                    // exist.
+                    send_message<Id>(
+                        reply_id,
+                        _sub_actor_list, _sub_actor_list_size,
+                        GET_SUB_ACTOR_LIST
+                    );
+                } break;
+
+                case DIE: {
+
+                    // An example of a manager requesting that
+                    // a list of actors under its management
+                    // also die when it does.
+                    for(int i=0; i<_sub_actor_list_size; i++) {
+                        bool ignore=true;
+                        send_message<bool>(
+                            _sub_actor_list[i],
+                            ignore,
+                            SubActor::DIE
+                        );
+                    }
+
+                    die();
+                }
+
+            }
+        }
+
+    }
+
+private:
+     Id *_sub_actor_list;
+     int _sub_actor_list_size;
+};
+\end{longcode}
+
+
+\subsection{Directors}
+The \term{Director} class is the interface a user uses to set up
+and execute an actor model job.
+The user specifies which \term{Actor} subclasses can be born in
+the model through the director.
+The user may then add some initial actors to the job and the director
+will return pointers to these actors, which the user may then use
+to specify some initial state for that actor before running the job.
+After, or indeed during, the running of the job, the user may extract
+information from the system through these initial actors.
+This may be done by other actors in the job sending messages to
+these initial actors which the user may then interact with directly.
+
+The director manages the initialization of a distributed factory
+and the creation of some communicators for the director and the actors
+to communicate over.
+It then manages the initialization and execution of actors either
+explicitly requested by the user, or requested through the distributed
+factory.
+The initialization of an actor includes wiring it up with an id
+so it can send and receive messages with other actors,
+a communicator to send those mesages over
+and a pointer to a distributed factory so it can request that other
+actors are born.
+
+When an actor is created by a director, it is added to the end of a queue.
+Each actor in the queue is, in turn, popped off the queue, its main
+function executed, and if it hasn't died since the execution of
+that main function, it is added to the end of the queue to be executed
+again later.
+For actors created through the distributed factory, the director
+manages the deallocation of these actors after they die.
+For actors requested explicitly be the user, as opposed to those
+born of another actor, it is up to the user
+to handle their destruction, which should not be performed before the actor
+has died.
+
+There are 3 ways for a director to stop running an actor model job.
+The first is if a maximum number of \term{ticks} is specified.
+A \term{tick} is defined as the execution cycle of one \term{Actor}.
+The second is if every director no longer has any live actors to
+execute.
+The third is if a process explicitly requests the director ends
+its run.
+This final method is useful for situations where a particular trigger
+should be used to terminate the run, rather than relying on a fixed
+number of \term{tick}s or on all the actors dying.
+
+
+\subsection{Performance Considerations}
+Directors will compare their list sizes after a given number of \term{tick}s
+to determine when every director's list has been emptied.
+This routine requires a global barrier, so for simulations where it
+is not important to end immediately after there is no work left to do,
+this interval can be set to a very long value.
+It may also be possible to remove this synchronization altogether
+if remote memory accesses are used to determine the loads of different
+directors, or if the onus were to be placed entirely on the user
+to determine when the director run ends.
+While no performance measurements have been made to date,
+the framework has been tested to work on up to 64 cores on Morar.
+
+
+\section{Population Model Simulation}
+The goals of the simulation were to implement the model described by
+the biologists in such a way that the starting parameters could
+be easily changed, and that the system would output the current state
+of the cells at the end of the year, and the frog count at some interval.
+In this implementation, a year is determined by a wall clock time.
+As such, at the end of the year, the frog population and the state
+of the cells are output simultaneously.
+There are many methods of determining a year, each with their own
+merits and drawbacks.
+The issue with wall clock time is that the average number of hops
+per frog per year can vary wildly with the number of frogs in the
+simulation and the number of cores used.
+A better metric to use here may have been average hops per frog in
+the simulation.
+This could be used by polling one or a small number of cells for their
+population data, comparing that to the number of cells in the grid and
+the number of frogs in the simulation and determining the average
+hops per frog from there.
+
+\subsection{Cell Actors}
+Cells contain some historical data about the frogs that land on them.
+When a frog lands on a cell, it informs the cell that it has landed
+on it and of its infection status.
+The cell then updates its \term{populationInflux} and
+\term{infection\_level} accordingly.
+
+An actor can request that a cell sends its \term{populationInflux} and
+\term{infection\_level} to it.
+This is the suggested method for monitoring these values in a cell.
+It may be tempting for a user to simply make an explicit request
+to the director for a number of cells and use them for the simulation.
+As they would be on the same process, this would enduce a high
+load on that process with respect to other actors messaging the
+cell.
+
+A cell can also be instructed to set its \term{populationInflux} and
+\term{infection\_level} values to a given value.
+This allows for both initializing cells to have some given values
+for these terms, or to simulate a monsoon by instructing them to set
+these values to 0.
+
+\subsection{Frog Actor}
+A frog actor requires several values to be initialized before it
+begins moving about the environment.
+First, it must be informed of its initial coordinates.
+Next, it must be given a list of the cells it will be moving about.
+Finally, it must be given the id of an actor it will message when
+it has finished being initialized, and then again when it dies.
+A frog may optionally be told to become infected.
+
+When a frog is first fully initialized, it requests the state of the cell
+it is in.
+It will then wait until it receives this data before hopping.
+When it has hopped, it will increment a counter tracking the number
+of hops it has performed and it will
+request the state of the cell it has hopped to before hopping again.
+When it receives the state data from the cell, it will add the
+\term{populationInflux} value to the current running sum of values
+it has received, and add the \term{infection\_level} to a circular
+buffer containing the last 500 values it has received.
+
+Immediately after hopping, a frog will test whether it should give
+birth, become infected or die, according to the biologists' model
+using the functions provided by the biologists.
+
+When testing birth, the frog tests if the current total of hops is
+divisible by 300, the number given in the model.
+It then divides the currently tracked sum of \term{populationInflux}
+values by 300 to find the average, and gives birth if the
+function provided by the biologists says it should.
+If it gives birth, it will also send the necessary initialization
+data to the newly created child.
+
+When testing for infection, the frog finds the average of all the
+values in the circular buffer of \term{infection\_level}s and
+feeds this into the biologists' function, becoming infected if
+the function tells it to.
+
+When testing for death, the frog tests if the current hop count is
+divisible by 700.
+If so, it runs the biologists' function to test whether or not it should
+die, dying if told to do so.
+
+\subsection{Simulation Actor}
+The simulation actor is used to create a grid of cells, and to
+give birth and initialize the initial batch of frogs.
+It is also used to track the state of the grid cells,
+the number of frogs in the simulation
+and to initiate the monsoon.
+
+The simulation actor is added to the director as a user added actor
+on the root process.
+A user then calls the initialize method with the parameters of the simulation.
+The user then runs the director.
+The simulation written can optionally accept command line arguments
+reflecting these paramaters.
+
+The initialize method will spawn 16 grid cells.
+A fixed number of cells was chosen, because the function provided
+by the biologists is hard coded to enumerate 16 cells.
+The method will then spawns the requested number of frogs,
+initializing them by sending the generated grid of cells,
+setting their initial positions to $(0,0)$
+and setting the actor they should notify of their initialization and
+death to the simulator.
+It will also set a requested number of frogs to infected.
+This initialization is necessary, because if all frogs are healthy
+and there is no disease in the environment, no frog will ever
+become infected.
+This mimics the effect of a year ending with a certain number of infected
+frogs and the population data in the cells being reset.
+
+Each time the simulation actor runs, it will check for new messages.
+It may receive a message from a frog stating whether it has been initialized
+or if it has died.
+The simulation actor will adjust a frog counter accordingly.
+It may also receive a number of messages containing the current population
+data of a cell.
+This should only happen soon after it has explicitly requested the data
+at the end of a year, so it outputs this data to the screen immediately.
+
+On every run, the actor checks the current wall time.
+If a specified number of seconds have elapsed since the last year,
+the simulation actor will perform a number of end-of-year tasks.
+It will output the current year, the current number of frogs in
+the simulation and to request that cells send it their population
+data.
+As already mentioned, when the simulator receives these messages, it outputs
+the results immediately, as we expect the responses to come soon after
+this event.
+It then requests the cells reset their population data.
+The population request and population reset messages are sent
+immediately, one after the other.
+This assumes that messages are received in order.
+As MPI guarantees this, it is a reasonable assumption to make.
+
+If the requested number of years to simulate has passed,
+the simulator will ask the director to end the run.
+At this time, the simulator will also check if the current number of
+frogs in the simulation has passed 100.
+If so, it will ask the director to stop and will output an error
+stating the number of frogs in the system has passed this number.
+
+The simulator will also output frog populations at a given interval.
+The time check and update are performed much like the end of year.
+
+
+\subsection{Results}
+In the simulation written, the survival of the frogs depends strongly
+on the length of a year.
+It appears that almost all the frogs in the simulation become infected
+rather rapidly, even if only a single infected frog is introduced.
+As such, the infection level tends to be roughly equal to the
+population influx in all cells.
+
+Different cells in the simulation tend to have roughly similar population
+data at any one time.
+This seems reasonable, as if the frogs are moving randomly, they are
+likely to disperse evenly about the system.
+
+The primary factor determining the survival or extinction appears to be
+the maximum population influx a cell can attain in a year.
+To run more stable simulations, it may be better to tie the length
+of a year to the influx per frog of some cell or group of cells.
+This could be more accurate if some figures are known about the number
+of hops an individual frog is expected to do in a year.
+It also circumvents the problem of the simulation runing faster
+when run on more cores, requiring the length of a year to be tuned
+to a reasonable number.
+
+
+\section{Conclusion and Discussion}
+MPI is quite a good fit for the actor model, as messages can be
+targeted at specific actors on a process using message tags.
+The guarantee of message ordering from MPI also allows metadata to
+be passed along with messages, as was done here, to allow messages
+to include a further tag.
+While this could have been implemented by folding the message tag
+into the MPI tag or the message,
+the use of an extra message as a header allows richer metadata to be
+passed between actors.
+
+C\verb!++! is also rather well suited, as defining new actors is quite
+a clean procedure.
+Much of the gritty details of the implementation can be hidden away
+from the user, allowing them to simply inherit from an actor class
+and use some methods provided by it.
+Indeed, if it is later decided to change the message passing library used,
+this can be done without affecting much of the user's code.
+In this implementation, we require a user to explicitly initialize MPI,
+attach a buffer and finalize it.
+This could easily be wrapped in some initialization and finalization
+functions in the library, or even in the director.
+
+This implementation relies rather heavily on templating to effectively
+hide much of the details of the implementation from the user
+and to allow objects to be enumerated and identified in MPI messages.
+The factory class, for example, uses templating to enumerate and identify
+some factory functions for creating new instances of subclasses in a
+manner that these identifiers can be safely sent across MPI.
+One drawback of relying on templating is that the templated code
+must be compiled with every file that might call it with a new template.
+This can have a large impact on the time taken to compile the code.
+This is a small price to pay for the increased ease of use and
+cleanness of templates.
+
+There is also the ugly requirement of requiring the user to register
+any actor classes that may be born in the simulation.
+Automatic subclass registration was investigated along with using
+RTTI and other promising C\verb!++! features.
+Due to poor reliability on the part of execution routes of highly
+asynchronous algorithms and on the part of compiler implementations,
+the safer, if less glamorous route was taken.
+
+The simulation written delivered the interesting result that
+under the current model,
+the survival or extinction of the population of frogs depends strongly
+on the length of a year.
+That is, the maximum possible value the populationInflux of a cell can
+reach.
+It also found that a single infected frog will rapidly infect the
+entire population of frogs.
+
+To simulate a stable population on 32 cores as has been done here,
+a rather low year time must be used.
+With the current implementation, this means that a year may pass
+before a cell has had a chence to return its population data and have
+it output to the screen.
+As such, a little mangling of data may occur.
+For similar timing reasons, the first year should be discarded.
+
+
+\newpage
+\appendix
+\section{Sample Data}
+The following is the output for the parameters
+\begin{itemize}
+    \item Initial number of frogs: 34
+    \item Initial number of infected frogs: 1
+    \item Maximum number of allowed frogs: 100
+    \item Frog population output frequency: 0.005 seconds
+    \item Number of cells: 16
+    \item Years to model: 100
+    \item Length of year: 0.01 seconds
+\end{itemize}
+
+The actual output has more newlines, but the mangling done by LaTeX
+has served well to compress the data into a managable length.
+
+{\footnotesize
+YEAR: 1
+FROG POPULATION: 28
+FROG POPULATION: 28
+DATA: (1,0,0)
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (11,0,0)
+DATA: (12,0,0)
+DATA: (13,0,0)
+DATA: (14,0,0)
+DATA: (15,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+DATA: (9,0,0)
+DATA: (6,1,0)
+DATA: (2,6,0)
+FROG POPULATION: 33
+DATA: (4,7,0)
+
+YEAR: 2
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (1,18,0)
+DATA: (2,6,0)
+DATA: (4,7,0)
+DATA: (5,20,1)
+DATA: (6,8,2)
+DATA: (8,9,0)
+DATA: (11,7,1)
+DATA: (12,8,0)
+DATA: (13,10,0)
+DATA: (14,14,1)
+DATA: (15,16,0)
+DATA: (0,9,0)
+DATA: (7,13,0)
+DATA: (9,8,0)
+DATA: (3,11,0)
+FROG POPULATION: 34
+DATA: (10,12,0)
+
+YEAR: 3
+FROG POPULATION: 34
+DATA: (1,20,0)
+DATA: (2,11,0)
+DATA: (4,17,1)
+DATA: (7,8,0)
+DATA: (8,10,0)
+DATA: (9,11,0)
+DATA: (10,13,0)
+DATA: (11,7,0)
+DATA: (12,11,0)
+DATA: (13,11,0)
+DATA: (14,10,0)
+DATA: (15,7,0)
+DATA: (0,12,0)
+FROG POPULATION: 34
+DATA: (6,0,0)
+FROG POPULATION: 34
+DATA: (3,12,0)
+DATA: (5,23,1)
+
+YEAR: 4
+FROG POPULATION: 34
+DATA: (1,13,0)
+DATA: (2,13,0)
+DATA: (3,7,0)
+DATA: (5,5,0)
+DATA: (7,24,0)
+DATA: (8,11,0)
+DATA: (9,13,0)
+DATA: (11,9,0)
+DATA: (12,15,0)
+DATA: (13,16,0)
+DATA: (14,15,0)
+DATA: (15,15,0)
+DATA: (0,10,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (4,14,0)
+DATA: (6,13,0)
+DATA: (10,11,0)
+
+YEAR: 5
+FROG POPULATION: 34
+DATA: (1,14,0)
+DATA: (2,20,1)
+DATA: (4,16,0)
+DATA: (6,12,0)
+DATA: (8,14,0)
+DATA: (9,20,0)
+DATA: (10,6,0)
+DATA: (11,13,0)
+DATA: (12,18,1)
+DATA: (13,11,0)
+DATA: (14,12,0)
+DATA: (15,9,0)
+DATA: (0,22,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (3,15,0)
+DATA: (7,21,1)
+DATA: (5,14,0)
+
+YEAR: 6
+FROG POPULATION: 34
+DATA: (1,13,0)
+DATA: (2,12,1)
+DATA: (3,7,0)
+DATA: (5,7,0)
+DATA: (7,9,1)
+DATA: (8,10,0)
+DATA: (9,10,0)
+DATA: (11,7,0)
+DATA: (12,12,0)
+DATA: (13,12,0)
+DATA: (14,18,0)
+DATA: (15,13,1)
+DATA: (0,11,0)
+FROG POPULATION: 34
+DATA: (4,3,0)
+FROG POPULATION: 34
+DATA: (6,6,0)
+DATA: (10,21,0)
+
+YEAR: 7
+FROG POPULATION: 34
+DATA: (1,18,0)
+DATA: (4,20,0)
+DATA: (6,13,0)
+DATA: (8,15,0)
+DATA: (9,24,1)
+DATA: (10,13,0)
+DATA: (11,14,0)
+DATA: (12,15,0)
+DATA: (13,13,0)
+DATA: (14,23,0)
+DATA: (15,12,0)
+DATA: (0,13,0)
+FROG POPULATION: 34
+DATA: (3,12,1)
+DATA: (7,16,0)
+FROG POPULATION: 34
+DATA: (5,17,0)
+DATA: (2,18,2)
+
+YEAR: 8
+FROG POPULATION: 34
+DATA: (1,14,0)
+DATA: (2,11,0)
+DATA: (3,8,0)
+DATA: (5,7,0)
+DATA: (7,9,0)
+DATA: (8,12,0)
+DATA: (9,11,0)
+DATA: (11,9,0)
+DATA: (12,8,0)
+DATA: (13,14,0)
+DATA: (14,11,0)
+DATA: (15,8,1)
+DATA: (0,14,0)
+FROG POPULATION: 34
+DATA: (4,0,0)
+DATA: (6,17,0)
+FROG POPULATION: 34
+DATA: (10,13,0)
+
+YEAR: 9
+FROG POPULATION: 34
+DATA: (1,16,0)
+DATA: (4,18,0)
+DATA: (6,11,0)
+DATA: (8,12,0)
+DATA: (9,15,0)
+DATA: (10,7,0)
+DATA: (11,13,0)
+DATA: (12,13,0)
+DATA: (13,18,0)
+DATA: (14,18,0)
+DATA: (15,7,0)
+DATA: (0,10,0)
+FROG POPULATION: 34
+DATA: (5,11,0)
+DATA: (3,0,0)
+DATA: (7,19,0)
+FROG POPULATION: 34
+DATA: (2,15,0)
+
+YEAR: 10
+FROG POPULATION: 34
+DATA: (1,19,1)
+DATA: (2,9,1)
+DATA: (3,17,1)
+DATA: (5,19,1)
+DATA: (7,14,1)
+DATA: (8,26,1)
+DATA: (9,16,0)
+DATA: (10,30,2)
+DATA: (11,20,1)
+DATA: (12,33,2)
+DATA: (13,24,1)
+DATA: (14,25,3)
+DATA: (15,19,1)
+DATA: (0,22,3)
+FROG POPULATION: 34
+DATA: (4,0,0)
+DATA: (6,36,4)
+FROG POPULATION: 34
+
+YEAR: 11
+FROG POPULATION: 34
+DATA: (1,23,0)
+DATA: (4,14,2)
+DATA: (5,12,0)
+DATA: (6,10,0)
+DATA: (8,18,0)
+DATA: (9,22,0)
+DATA: (10,17,1)
+DATA: (11,15,0)
+DATA: (12,13,0)
+DATA: (13,17,0)
+DATA: (14,23,1)
+DATA: (15,17,0)
+DATA: (0,19,0)
+DATA: (3,0,0)
+FROG POPULATION: 34
+DATA: (7,27,0)
+FROG POPULATION: 34
+DATA: (2,22,0)
+
+YEAR: 12
+FROG POPULATION: 34
+DATA: (1,12,0)
+DATA: (2,7,0)
+DATA: (4,35,2)
+DATA: (5,19,0)
+DATA: (7,25,0)
+DATA: (8,17,0)
+DATA: (9,13,1)
+DATA: (10,30,1)
+DATA: (11,18,1)
+DATA: (12,25,2)
+DATA: (13,21,0)
+DATA: (14,23,0)
+DATA: (15,15,0)
+DATA: (0,19,1)
+FROG POPULATION: 34
+DATA: (6,21,1)
+FROG POPULATION: 34
+DATA: (3,27,0)
+
+YEAR: 13
+FROG POPULATION: 34
+DATA: (1,23,2)
+DATA: (3,11,0)
+DATA: (5,14,0)
+DATA: (7,26,1)
+DATA: (8,21,1)
+DATA: (9,17,2)
+DATA: (10,15,0)
+DATA: (11,25,1)
+DATA: (14,17,0)
+DATA: (15,15,0)
+DATA: (0,32,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (4,22,0)
+DATA: (2,24,2)
+DATA: (6,18,0)
+
+YEAR: 14
+FROG POPULATION: 34
+DATA: (2,1,0)
+DATA: (4,1,0)
+DATA: (5,1,0)
+DATA: (6,0,0)
+DATA: (8,0,0)
+DATA: (9,2,0)
+DATA: (10,2,0)
+DATA: (11,1,0)
+DATA: (14,1,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (3,1,0)
+DATA: (7,4,0)
+
+YEAR: 15
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (9,1,0)
+DATA: (10,0,0)
+DATA: (14,0,0)
+DATA: (0,1,0)
+FROG POPULATION: 34
+DATA: (4,1,0)
+FROG POPULATION: 34
+DATA: (6,0,0)
+DATA: (2,1,0)
+
+YEAR: 16
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,1,0)
+DATA: (5,0,0)
+DATA: (6,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (10,0,0)
+DATA: (14,1,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (7,0,0)
+FROG POPULATION: 34
+
+YEAR: 17
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (7,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (4,0,0)
+DATA: (6,0,0)
+FROG POPULATION: 34
+DATA: (2,0,0)
+
+YEAR: 18
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,0,0)
+DATA: (5,0,0)
+DATA: (6,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (7,0,0)
+FROG POPULATION: 34
+
+YEAR: 19
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (7,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (4,0,0)
+DATA: (6,0,0)
+FROG POPULATION: 34
+DATA: (2,0,0)
+
+YEAR: 20
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,0,0)
+DATA: (5,0,0)
+DATA: (6,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+DATA: (3,0,0)
+FROG POPULATION: 34
+DATA: (7,0,0)
+FROG POPULATION: 34
+
+YEAR: 21
+FROG POPULATION: 34
+DATA: (4,0,0)
+DATA: (7,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+DATA: (6,0,0)
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (9,0,0)
+DATA: (9,0,0)
+DATA: (11,2,0)
+DATA: (12,28,1)
+DATA: (14,0,0)
+DATA: (15,2,0)
+DATA: (1,3,0)
+DATA: (8,0,0)
+DATA: (11,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (1,1,0)
+DATA: (15,0,0)
+DATA: (11,0,0)
+DATA: (14,0,0)
+DATA: (11,0,0)
+DATA: (1,0,0)
+DATA: (15,0,0)
+DATA: (9,0,0)
+DATA: (11,0,0)
+DATA: (8,0,0)
+DATA: (1,0,0)
+DATA: (14,0,0)
+DATA: (15,0,0)
+DATA: (11,0,0)
+DATA: (9,0,0)
+DATA: (8,0,0)
+DATA: (1,0,0)
+DATA: (13,23,1)
+DATA: (11,0,0)
+DATA: (14,0,0)
+DATA: (15,0,0)
+DATA: (1,0,0)
+DATA: (13,0,0)
+DATA: (8,0,0)
+DATA: (14,0,0)
+DATA: (1,0,0)
+DATA: (13,0,0)
+DATA: (15,0,0)
+DATA: (12,2,0)
+DATA: (15,0,0)
+DATA: (1,0,0)
+DATA: (13,1,0)
+DATA: (12,0,0)
+DATA: (15,0,0)
+DATA: (13,0,0)
+DATA: (13,0,0)
+DATA: (12,0,0)
+DATA: (13,0,0)
+DATA: (13,0,0)
+DATA: (13,0,0)
+DATA: (12,0,0)
+DATA: (12,0,0)
+DATA: (12,0,0)
+DATA: (12,0,0)
+DATA: (12,0,0)
+
+YEAR: 22
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (1,8,0)
+DATA: (4,7,0)
+DATA: (5,7,0)
+DATA: (6,8,0)
+DATA: (8,4,0)
+DATA: (9,8,0)
+DATA: (10,10,0)
+DATA: (11,4,0)
+DATA: (12,3,0)
+DATA: (13,6,0)
+DATA: (14,11,0)
+DATA: (15,11,0)
+DATA: (0,4,0)
+DATA: (2,6,0)
+DATA: (3,6,1)
+FROG POPULATION: 34
+DATA: (7,11,0)
+
+YEAR: 23
+FROG POPULATION: 34
+DATA: (1,18,1)
+DATA: (2,18,0)
+DATA: (3,28,0)
+DATA: (4,20,0)
+DATA: (5,19,0)
+DATA: (7,20,0)
+DATA: (8,16,1)
+DATA: (9,14,0)
+DATA: (11,25,0)
+DATA: (12,18,0)
+DATA: (13,23,0)
+DATA: (14,16,0)
+DATA: (15,19,0)
+DATA: (0,26,0)
+FROG POPULATION: 34
+DATA: (10,22,1)
+DATA: (6,16,0)
+FROG POPULATION: 34
+
+YEAR: 24
+FROG POPULATION: 34
+DATA: (1,21,0)
+DATA: (2,24,0)
+DATA: (4,16,1)
+DATA: (5,21,0)
+DATA: (6,18,0)
+DATA: (8,22,0)
+DATA: (9,27,0)
+DATA: (11,24,0)
+DATA: (12,23,1)
+DATA: (13,17,0)
+DATA: (14,29,0)
+DATA: (15,21,0)
+DATA: (0,26,0)
+FROG POPULATION: 34
+DATA: (7,17,1)
+FROG POPULATION: 34
+DATA: (3,26,1)
+
+YEAR: 25
+FROG POPULATION: 34
+DATA: (1,17,0)
+DATA: (3,15,0)
+DATA: (4,20,0)
+DATA: (5,15,0)
+DATA: (7,15,0)
+DATA: (8,12,0)
+DATA: (9,12,0)
+DATA: (11,15,0)
+DATA: (12,22,0)
+DATA: (13,16,0)
+DATA: (14,18,0)
+DATA: (10,29,0)
+DATA: (15,25,0)
+DATA: (0,18,0)
+FROG POPULATION: 34
+DATA: (10,0,0)
+DATA: (6,24,1)
+FROG POPULATION: 34
+DATA: (2,20,0)
+
+YEAR: 26
+FROG POPULATION: 34
+DATA: (1,22,0)
+DATA: (2,18,0)
+DATA: (3,20,1)
+DATA: (4,29,0)
+DATA: (5,29,1)
+DATA: (6,25,0)
+DATA: (8,24,0)
+DATA: (9,27,0)
+DATA: (11,30,1)
+DATA: (12,27,1)
+DATA: (13,21,1)
+DATA: (14,36,0)
+DATA: (15,21,0)
+DATA: (0,20,0)
+FROG POPULATION: 34
+DATA: (7,27,1)
+DATA: (10,24,0)
+FROG POPULATION: 34
+
+YEAR: 27
+FROG POPULATION: 34
+DATA: (1,29,1)
+DATA: (3,16,0)
+DATA: (5,21,0)
+DATA: (7,24,0)
+DATA: (8,18,0)
+DATA: (9,22,1)
+DATA: (10,8,1)
+DATA: (11,20,2)
+DATA: (12,14,3)
+DATA: (13,14,0)
+DATA: (14,22,0)
+DATA: (15,14,0)
+DATA: (0,17,1)
+DATA: (6,24,0)
+FROG POPULATION: 34
+DATA: (4,11,0)
+FROG POPULATION: 34
+DATA: (2,18,1)
+
+YEAR: 28
+FROG POPULATION: 34
+DATA: (1,20,0)
+DATA: (2,29,2)
+DATA: (3,22,0)
+DATA: (4,18,2)
+DATA: (5,17,0)
+DATA: (7,28,1)
+DATA: (8,22,0)
+DATA: (9,24,2)
+DATA: (11,25,1)
+DATA: (12,24,1)
+DATA: (13,30,0)
+DATA: (14,35,1)
+DATA: (15,20,1)
+DATA: (0,20,1)
+FROG POPULATION: 34
+DATA: (10,25,0)
+FROG POPULATION: 34
+DATA: (6,34,0)
+
+YEAR: 29
+FROG POPULATION: 34
+DATA: (1,26,1)
+DATA: (3,14,1)
+DATA: (5,31,1)
+DATA: (6,15,0)
+DATA: (8,27,0)
+DATA: (9,38,1)
+DATA: (10,24,0)
+DATA: (11,27,0)
+DATA: (12,34,0)
+DATA: (13,14,1)
+DATA: (14,32,0)
+DATA: (15,21,0)
+DATA: (0,29,0)
+FROG POPULATION: 34
+DATA: (4,25,1)
+FROG POPULATION: 34
+DATA: (7,21,0)
+DATA: (2,30,1)
+
+YEAR: 30
+FROG POPULATION: 34
+DATA: (1,14,0)
+DATA: (2,23,0)
+DATA: (3,18,0)
+DATA: (4,22,1)
+DATA: (5,21,0)
+DATA: (7,15,0)
+DATA: (8,19,0)
+DATA: (9,28,0)
+DATA: (11,22,0)
+DATA: (12,29,0)
+DATA: (13,22,0)
+DATA: (14,32,0)
+DATA: (15,22,0)
+DATA: (0,19,0)
+DATA: (10,17,1)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (6,14,0)
+
+YEAR: 31
+FROG POPULATION: 34
+DATA: (1,27,0)
+DATA: (3,31,0)
+DATA: (4,27,1)
+DATA: (5,24,0)
+DATA: (6,15,0)
+DATA: (8,21,0)
+DATA: (9,25,0)
+DATA: (11,33,0)
+DATA: (12,28,0)
+DATA: (13,26,0)
+DATA: (14,21,0)
+DATA: (15,29,0)
+DATA: (0,26,1)
+FROG POPULATION: 34
+DATA: (7,29,0)
+FROG POPULATION: 34
+DATA: (10,32,1)
+DATA: (2,38,1)
+
+YEAR: 32
+FROG POPULATION: 34
+DATA: (1,24,0)
+DATA: (2,6,0)
+DATA: (3,16,0)
+DATA: (5,21,0)
+DATA: (8,16,0)
+DATA: (9,17,0)
+DATA: (10,24,0)
+DATA: (11,18,1)
+DATA: (12,22,0)
+DATA: (13,16,0)
+DATA: (14,17,1)
+DATA: (15,35,1)
+DATA: (0,14,0)
+DATA: (6,18,1)
+FROG POPULATION: 34
+DATA: (7,25,0)
+FROG POPULATION: 34
+DATA: (4,25,1)
+
+YEAR: 33
+FROG POPULATION: 34
+DATA: (1,31,1)
+DATA: (3,28,1)
+DATA: (4,12,2)
+DATA: (5,31,2)
+DATA: (7,21,1)
+DATA: (8,31,1)
+DATA: (9,28,1)
+DATA: (11,25,1)
+DATA: (12,22,0)
+DATA: (13,27,1)
+DATA: (14,22,1)
+DATA: (15,22,1)
+DATA: (0,17,0)
+FROG POPULATION: 34
+DATA: (6,33,0)
+FROG POPULATION: 34
+DATA: (10,33,1)
+DATA: (2,36,0)
+
+YEAR: 34
+FROG POPULATION: 34
+DATA: (1,25,1)
+DATA: (2,15,0)
+DATA: (3,20,0)
+DATA: (5,18,0)
+DATA: (6,29,1)
+DATA: (8,24,0)
+DATA: (9,34,0)
+DATA: (10,17,0)
+DATA: (11,26,0)
+DATA: (12,21,0)
+DATA: (13,25,0)
+DATA: (14,22,0)
+DATA: (15,26,0)
+DATA: (0,14,0)
+FROG POPULATION: 34
+DATA: (7,19,1)
+DATA: (4,7,0)
+FROG POPULATION: 34
+
+YEAR: 35
+FROG POPULATION: 34
+DATA: (3,26,3)
+DATA: (4,7,1)
+DATA: (5,33,4)
+DATA: (7,30,2)
+DATA: (8,29,0)
+DATA: (9,25,0)
+DATA: (11,31,3)
+DATA: (13,22,2)
+DATA: (14,31,2)
+DATA: (15,24,1)
+DATA: (0,29,0)
+FROG POPULATION: 34
+DATA: (6,14,0)
+DATA: (10,34,2)
+FROG POPULATION: 34
+DATA: (2,36,4)
+
+YEAR: 36
+FROG POPULATION: 34
+DATA: (2,1,0)
+DATA: (3,7,0)
+DATA: (5,4,0)
+DATA: (6,3,0)
+DATA: (8,2,1)
+DATA: (9,4,0)
+DATA: (10,1,0)
+DATA: (11,0,0)
+DATA: (14,6,0)
+DATA: (0,3,0)
+FROG POPULATION: 34
+DATA: (7,0,0)
+DATA: (4,9,0)
+FROG POPULATION: 34
+
+YEAR: 37
+FROG POPULATION: 34
+DATA: (3,2,0)
+DATA: (4,0,0)
+DATA: (5,1,0)
+DATA: (6,2,0)
+DATA: (8,3,0)
+DATA: (9,2,0)
+DATA: (14,1,0)
+DATA: (0,2,0)
+FROG POPULATION: 34
+DATA: (10,5,0)
+FROG POPULATION: 34
+DATA: (2,2,0)
+DATA: (7,2,0)
+
+YEAR: 38
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (10,1,0)
+DATA: (14,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (4,0,0)
+FROG POPULATION: 34
+DATA: (6,0,0)
+
+YEAR: 39
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (4,0,0)
+DATA: (5,0,0)
+DATA: (6,0,0)
+DATA: (9,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (7,0,0)
+DATA: (2,0,0)
+
+YEAR: 40
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (3,0,0)
+DATA: (4,0,0)
+DATA: (7,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (6,0,0)
+DATA: (10,0,0)
+
+YEAR: 41
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (6,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (7,0,0)
+FROG POPULATION: 34
+DATA: (4,0,0)
+DATA: (2,0,0)
+DATA: (1,27,0)
+
+YEAR: 42
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (5,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (12,24,1)
+DATA: (13,2,0)
+DATA: (14,0,0)
+DATA: (15,4,0)
+DATA: (15,0,0)
+DATA: (9,0,0)
+DATA: (8,0,0)
+DATA: (5,0,0)
+DATA: (14,0,0)
+DATA: (15,0,0)
+DATA: (8,0,0)
+DATA: (13,2,0)
+DATA: (12,5,0)
+DATA: (14,0,0)
+DATA: (15,0,0)
+DATA: (13,0,0)
+DATA: (15,0,0)
+DATA: (1,5,1)
+DATA: (15,0,0)
+DATA: (13,0,0)
+DATA: (12,3,0)
+DATA: (1,1,0)
+DATA: (12,1,0)
+DATA: (13,0,0)
+DATA: (13,0,0)
+DATA: (12,0,0)
+DATA: (12,0,0)
+DATA: (12,0,0)
+DATA: (1,2,0)
+DATA: (1,0,0)
+DATA: (1,0,0)
+DATA: (1,0,0)
+DATA: (1,6,0)
+DATA: (2,6,0)
+DATA: (3,9,0)
+DATA: (4,8,1)
+DATA: (5,11,1)
+DATA: (6,7,1)
+DATA: (8,6,0)
+DATA: (9,6,0)
+DATA: (12,4,1)
+DATA: (13,6,0)
+DATA: (14,15,3)
+DATA: (15,5,0)
+DATA: (0,2,0)
+FROG POPULATION: 34
+DATA: (11,1,0)
+DATA: (11,0,0)
+DATA: (11,0,0)
+DATA: (11,0,0)
+DATA: (11,0,0)
+DATA: (11,5,1)
+DATA: (7,3,0)
+DATA: (10,2,0)
+
+YEAR: 43
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (1,12,1)
+DATA: (3,15,0)
+DATA: (5,14,0)
+DATA: (7,9,0)
+DATA: (8,15,0)
+DATA: (9,11,0)
+DATA: (10,10,0)
+DATA: (11,18,0)
+DATA: (12,10,0)
+DATA: (13,16,0)
+DATA: (14,14,0)
+DATA: (15,11,0)
+DATA: (0,20,0)
+FROG POPULATION: 34
+DATA: (4,16,0)
+DATA: (2,14,1)
+DATA: (6,12,0)
+
+YEAR: 44
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (1,14,0)
+DATA: (2,22,1)
+DATA: (3,16,1)
+DATA: (4,19,3)
+DATA: (5,14,1)
+DATA: (6,13,1)
+DATA: (8,17,0)
+DATA: (9,14,2)
+DATA: (11,9,1)
+DATA: (12,15,1)
+DATA: (13,16,1)
+DATA: (14,17,1)
+DATA: (15,14,2)
+DATA: (0,16,3)
+FROG POPULATION: 34
+DATA: (10,0,0)
+DATA: (7,17,0)
+
+YEAR: 45
+FROG POPULATION: 34
+DATA: (1,16,0)
+DATA: (3,18,0)
+DATA: (5,4,0)
+DATA: (7,13,0)
+DATA: (8,15,1)
+DATA: (9,12,0)
+DATA: (10,9,0)
+DATA: (11,12,0)
+DATA: (12,14,0)
+DATA: (13,10,0)
+DATA: (14,11,0)
+DATA: (15,15,0)
+DATA: (0,12,0)
+FROG POPULATION: 34
+DATA: (4,0,0)
+DATA: (2,0,0)
+DATA: (6,12,0)
+FROG POPULATION: 34
+
+YEAR: 46
+FROG POPULATION: 34
+DATA: (1,15,0)
+DATA: (2,9,0)
+DATA: (3,10,0)
+DATA: (4,11,0)
+DATA: (5,13,0)
+DATA: (6,14,0)
+DATA: (8,17,0)
+DATA: (9,8,0)
+DATA: (11,16,1)
+DATA: (12,11,0)
+DATA: (13,15,1)
+DATA: (14,28,0)
+DATA: (15,11,0)
+DATA: (0,12,0)
+FROG POPULATION: 34
+DATA: (10,7,0)
+DATA: (7,14,0)
+FROG POPULATION: 34
+
+YEAR: 47
+FROG POPULATION: 34
+DATA: (1,7,0)
+DATA: (3,5,0)
+DATA: (5,14,1)
+DATA: (7,7,0)
+DATA: (8,14,1)
+DATA: (9,15,0)
+DATA: (10,7,0)
+DATA: (11,11,0)
+DATA: (12,7,2)
+DATA: (13,13,0)
+DATA: (14,14,1)
+DATA: (15,11,1)
+DATA: (0,12,0)
+FROG POPULATION: 34
+DATA: (6,0,0)
+DATA: (4,6,0)
+DATA: (2,0,0)
+FROG POPULATION: 34
+
+YEAR: 48
+FROG POPULATION: 34
+DATA: (1,9,0)
+DATA: (2,8,0)
+DATA: (3,9,0)
+DATA: (4,8,1)
+DATA: (5,8,0)
+DATA: (6,5,0)
+DATA: (8,10,0)
+DATA: (9,12,0)
+DATA: (11,13,0)
+DATA: (12,13,0)
+DATA: (13,7,0)
+DATA: (14,11,0)
+DATA: (15,3,0)
+DATA: (0,11,0)
+FROG POPULATION: 34
+DATA: (7,0,0)
+DATA: (10,18,1)
+FROG POPULATION: 34
+
+YEAR: 49
+FROG POPULATION: 34
+DATA: (1,8,1)
+DATA: (3,8,1)
+DATA: (5,6,0)
+DATA: (7,10,0)
+DATA: (8,4,1)
+DATA: (9,8,0)
+DATA: (10,6,0)
+DATA: (11,5,0)
+DATA: (12,6,0)
+DATA: (13,7,0)
+DATA: (14,4,0)
+DATA: (15,6,0)
+DATA: (0,10,1)
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,7,0)
+DATA: (6,0,0)
+FROG POPULATION: 34
+
+YEAR: 50
+FROG POPULATION: 34
+DATA: (1,20,0)
+DATA: (2,12,0)
+DATA: (3,8,0)
+DATA: (4,14,1)
+DATA: (5,20,0)
+DATA: (6,16,0)
+DATA: (8,14,0)
+DATA: (9,12,0)
+DATA: (11,13,0)
+DATA: (12,17,0)
+DATA: (13,10,0)
+DATA: (14,13,0)
+DATA: (15,13,0)
+DATA: (0,8,0)
+FROG POPULATION: 34
+DATA: (7,11,1)
+DATA: (10,16,0)
+FROG POPULATION: 34
+
+YEAR: 51
+FROG POPULATION: 34
+DATA: (1,24,0)
+DATA: (2,25,0)
+DATA: (3,23,2)
+DATA: (4,32,1)
+DATA: (5,25,1)
+DATA: (6,34,0)
+DATA: (8,34,0)
+DATA: (9,17,1)
+DATA: (11,25,0)
+DATA: (12,43,0)
+DATA: (13,20,0)
+DATA: (14,32,1)
+DATA: (15,17,1)
+DATA: (0,32,3)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (7,8,1)
+DATA: (10,11,0)
+
+YEAR: 52
+FROG POPULATION: 34
+DATA: (1,10,0)
+DATA: (3,15,0)
+DATA: (5,17,0)
+DATA: (7,18,0)
+DATA: (8,8,0)
+DATA: (9,9,0)
+DATA: (10,13,0)
+DATA: (11,14,0)
+DATA: (12,13,0)
+DATA: (13,11,0)
+DATA: (14,8,0)
+DATA: (15,9,0)
+DATA: (0,15,1)
+FROG POPULATION: 34
+DATA: (6,8,0)
+FROG POPULATION: 34
+DATA: (2,13,1)
+DATA: (4,13,0)
+
+YEAR: 53
+FROG POPULATION: 34
+DATA: (1,20,0)
+DATA: (2,15,0)
+DATA: (3,17,0)
+DATA: (4,18,0)
+DATA: (5,16,0)
+DATA: (6,15,0)
+DATA: (8,15,0)
+DATA: (9,12,0)
+DATA: (11,16,0)
+DATA: (12,17,0)
+DATA: (13,22,0)
+DATA: (14,15,0)
+DATA: (15,12,0)
+DATA: (0,14,0)
+DATA: (7,18,1)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (10,15,0)
+
+YEAR: 54
+FROG POPULATION: 34
+DATA: (1,16,1)
+DATA: (3,13,2)
+DATA: (5,15,0)
+DATA: (6,18,0)
+DATA: (8,17,0)
+DATA: (9,20,3)
+DATA: (10,16,1)
+DATA: (11,23,1)
+DATA: (12,15,1)
+DATA: (13,13,0)
+DATA: (14,10,1)
+DATA: (15,20,0)
+DATA: (0,25,1)
+FROG POPULATION: 34
+DATA: (2,17,0)
+DATA: (4,24,1)
+FROG POPULATION: 34
+DATA: (7,27,1)
+
+YEAR: 55
+FROG POPULATION: 34
+DATA: (2,16,0)
+DATA: (3,12,0)
+DATA: (4,13,0)
+DATA: (5,18,0)
+DATA: (7,4,0)
+DATA: (8,13,0)
+DATA: (9,18,0)
+DATA: (11,23,0)
+DATA: (13,13,1)
+DATA: (14,25,0)
+DATA: (15,14,0)
+DATA: (0,19,0)
+FROG POPULATION: 34
+DATA: (10,0,0)
+FROG POPULATION: 34
+DATA: (6,17,0)
+
+YEAR: 56
+FROG POPULATION: 34
+DATA: (3,1,0)
+DATA: (5,4,0)
+DATA: (6,2,0)
+DATA: (8,2,0)
+DATA: (9,2,0)
+DATA: (10,6,0)
+DATA: (11,2,0)
+DATA: (14,5,0)
+DATA: (0,6,0)
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,0,0)
+FROG POPULATION: 34
+DATA: (7,2,0)
+
+YEAR: 57
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (3,1,0)
+DATA: (4,2,0)
+DATA: (5,1,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (9,1,0)
+DATA: (11,4,0)
+DATA: (14,1,0)
+DATA: (0,1,0)
+FROG POPULATION: 34
+DATA: (10,0,0)
+DATA: (6,2,0)
+FROG POPULATION: 34
+
+YEAR: 58
+FROG POPULATION: 34
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (6,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (10,0,0)
+DATA: (14,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,0,0)
+DATA: (7,0,0)
+FROG POPULATION: 34
+
+YEAR: 59
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,0,0)
+DATA: (7,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (6,0,0)
+FROG POPULATION: 34
+
+YEAR: 60
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,0,0)
+DATA: (6,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (7,0,0)
+FROG POPULATION: 34
+DATA: (10,0,0)
+
+YEAR: 61
+FROG POPULATION: 34
+DATA: (7,0,0)
+DATA: (10,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 34
+DATA: (6,0,0)
+FROG POPULATION: 34
+DATA: (2,0,0)
+DATA: (4,0,0)
+
+YEAR: 62
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (1,16,1)
+DATA: (3,0,0)
+DATA: (5,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (11,0,0)
+DATA: (11,0,0)
+DATA: (5,0,0)
+DATA: (12,13,0)
+DATA: (13,2,0)
+DATA: (14,0,0)
+DATA: (8,0,0)
+DATA: (5,0,0)
+DATA: (3,0,0)
+DATA: (14,0,0)
+DATA: (11,0,0)
+DATA: (15,2,0)
+DATA: (8,0,0)
+DATA: (3,0,0)
+DATA: (11,0,0)
+DATA: (14,0,0)
+DATA: (15,1,0)
+DATA: (9,0,0)
+DATA: (15,0,0)
+DATA: (13,2,0)
+DATA: (9,0,0)
+DATA: (15,0,0)
+DATA: (13,0,0)
+DATA: (15,0,0)
+DATA: (13,0,0)
+DATA: (12,3,0)
+DATA: (1,5,0)
+DATA: (15,0,0)
+DATA: (13,0,0)
+DATA: (1,0,0)
+DATA: (1,0,0)
+DATA: (12,2,0)
+DATA: (13,0,0)
+DATA: (1,0,0)
+DATA: (12,0,0)
+DATA: (1,0,0)
+DATA: (12,0,0)
+DATA: (1,0,0)
+DATA: (12,0,0)
+DATA: (12,0,0)
+DATA: (1,5,0)
+DATA: (2,5,1)
+DATA: (3,5,0)
+DATA: (4,11,0)
+DATA: (5,7,0)
+DATA: (6,10,0)
+DATA: (8,8,0)
+DATA: (9,11,0)
+DATA: (10,8,0)
+DATA: (11,12,1)
+DATA: (12,13,0)
+DATA: (13,18,0)
+DATA: (14,5,0)
+DATA: (15,17,0)
+DATA: (0,2,0)
+FROG POPULATION: 34
+DATA: (7,22,0)
+
+YEAR: 63
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (1,56,0)
+DATA: (2,48,0)
+DATA: (3,48,1)
+DATA: (5,49,1)
+DATA: (7,25,1)
+DATA: (8,55,1)
+DATA: (9,46,2)
+DATA: (10,40,0)
+DATA: (11,48,2)
+DATA: (12,50,0)
+DATA: (13,45,1)
+DATA: (14,27,0)
+DATA: (15,34,1)
+DATA: (0,72,0)
+DATA: (4,29,0)
+FROG POPULATION: 34
+DATA: (6,39,0)
+
+YEAR: 64
+FROG POPULATION: 34
+DATA: (1,34,0)
+DATA: (2,50,1)
+DATA: (3,55,1)
+DATA: (4,38,0)
+DATA: (5,50,2)
+DATA: (6,26,2)
+DATA: (8,48,1)
+DATA: (9,37,0)
+DATA: (10,40,0)
+DATA: (11,65,2)
+DATA: (12,41,1)
+DATA: (13,46,1)
+DATA: (14,58,2)
+DATA: (15,50,0)
+DATA: (0,44,2)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (7,25,1)
+
+YEAR: 65
+FROG POPULATION: 34
+DATA: (1,33,1)
+DATA: (2,43,1)
+DATA: (3,28,2)
+DATA: (5,33,0)
+DATA: (7,17,0)
+DATA: (8,33,0)
+DATA: (9,43,0)
+DATA: (10,40,1)
+DATA: (11,24,1)
+DATA: (12,44,0)
+DATA: (13,28,0)
+DATA: (14,31,0)
+DATA: (15,36,0)
+DATA: (0,40,0)
+FROG POPULATION: 34
+DATA: (4,25,0)
+FROG POPULATION: 34
+DATA: (6,48,1)
+
+YEAR: 66
+FROG POPULATION: 34
+DATA: (1,45,0)
+DATA: (2,36,0)
+DATA: (3,39,1)
+DATA: (5,31,0)
+DATA: (6,29,0)
+DATA: (8,44,0)
+DATA: (9,49,1)
+DATA: (10,37,1)
+DATA: (11,37,0)
+DATA: (12,35,1)
+DATA: (13,33,2)
+DATA: (14,38,1)
+DATA: (15,42,0)
+DATA: (0,49,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (4,40,0)
+DATA: (7,40,1)
+
+YEAR: 67
+FROG POPULATION: 34
+DATA: (1,24,0)
+DATA: (2,27,1)
+DATA: (3,27,2)
+DATA: (4,29,0)
+DATA: (5,22,1)
+DATA: (7,30,0)
+DATA: (8,27,0)
+DATA: (9,27,2)
+DATA: (10,32,2)
+DATA: (11,18,0)
+DATA: (12,26,0)
+DATA: (13,33,1)
+DATA: (14,34,0)
+DATA: (15,29,1)
+DATA: (0,29,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (6,33,1)
+
+YEAR: 68
+FROG POPULATION: 34
+DATA: (1,24,0)
+DATA: (2,14,0)
+DATA: (3,20,0)
+DATA: (5,20,0)
+DATA: (6,10,0)
+DATA: (8,18,0)
+DATA: (9,16,0)
+DATA: (10,15,0)
+DATA: (11,26,0)
+DATA: (12,22,0)
+DATA: (13,20,1)
+DATA: (14,16,0)
+DATA: (15,17,0)
+DATA: (0,9,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (4,16,0)
+DATA: (7,22,1)
+
+YEAR: 69
+FROG POPULATION: 34
+DATA: (1,37,0)
+DATA: (2,30,0)
+DATA: (3,19,0)
+DATA: (4,19,0)
+DATA: (5,21,0)
+DATA: (7,28,0)
+DATA: (8,24,1)
+DATA: (9,19,0)
+DATA: (10,30,0)
+DATA: (11,29,0)
+DATA: (12,21,0)
+DATA: (13,21,0)
+DATA: (14,22,0)
+DATA: (15,14,1)
+DATA: (0,28,0)
+FROG POPULATION: 34
+FROG POPULATION: 34
+DATA: (6,32,1)
+
+YEAR: 70
+FROG POPULATION: 34
+DATA: (1,18,0)
+DATA: (2,16,0)
+DATA: (3,13,0)
+DATA: (5,11,0)
+DATA: (6,11,0)
+DATA: (8,18,0)
+DATA: (9,20,0)
+DATA: (10,17,0)
+DATA: (11,16,0)
+DATA: (12,21,0)
+DATA: (13,20,0)
+DATA: (14,17,0)
+DATA: (15,8,0)
+DATA: (0,16,0)
+FROG POPULATION: 34
+DATA: (4,4,0)
+DATA: (7,21,1)
+FROG POPULATION: 34
+
+YEAR: 71
+FROG POPULATION: 34
+DATA: (1,39,0)
+DATA: (2,30,0)
+DATA: (3,22,0)
+DATA: (4,43,1)
+DATA: (5,31,0)
+DATA: (7,33,1)
+DATA: (8,22,1)
+DATA: (9,30,0)
+DATA: (10,35,1)
+DATA: (11,32,0)
+DATA: (12,33,1)
+DATA: (13,33,2)
+DATA: (14,38,1)
+DATA: (15,28,1)
+DATA: (0,32,0)
+FROG POPULATION: 34
+DATA: (6,32,1)
+FROG POPULATION: 34
+
+YEAR: 72
+FROG POPULATION: 34
+DATA: (1,104,3)
+DATA: (2,93,3)
+DATA: (3,119,3)
+DATA: (4,102,7)
+DATA: (5,105,5)
+DATA: (6,96,4)
+DATA: (7,116,9)
+DATA: (8,88,3)
+DATA: (9,120,7)
+DATA: (10,109,3)
+DATA: (11,121,7)
+DATA: (12,119,7)
+DATA: (13,117,3)
+DATA: (14,112,6)
+DATA: (15,120,5)
+DATA: (0,89,1)
+FROG POPULATION: 34
+FROG POPULATION: 34
+
+YEAR: 73
+FROG POPULATION: 34
+DATA: (1,384,24)
+DATA: (2,426,50)
+DATA: (3,368,28)
+DATA: (4,400,64)
+DATA: (5,421,40)
+DATA: (6,398,43)
+DATA: (7,401,34)
+DATA: (8,392,36)
+DATA: (9,397,47)
+DATA: (10,409,45)
+DATA: (11,395,44)
+DATA: (12,401,29)
+DATA: (13,418,48)
+DATA: (14,422,48)
+DATA: (15,400,40)
+DATA: (0,395,39)
+FROG POPULATION: 34
+FROG POPULATION: 34
+
+YEAR: 74
+FROG POPULATION: 33
+DATA: (1,407,108)
+DATA: (2,391,100)
+DATA: (3,409,114)
+DATA: (4,410,127)
+DATA: (5,408,109)
+DATA: (6,377,105)
+DATA: (7,397,107)
+DATA: (8,450,115)
+DATA: (9,424,135)
+DATA: (10,424,120)
+DATA: (11,440,118)
+DATA: (12,422,109)
+DATA: (13,399,107)
+DATA: (14,385,107)
+DATA: (15,370,105)
+DATA: (0,424,119)
+FROG POPULATION: 33
+FROG POPULATION: 33
+
+YEAR: 75
+FROG POPULATION: 34
+DATA: (1,403,290)
+DATA: (2,391,284)
+DATA: (3,428,316)
+DATA: (4,406,287)
+DATA: (5,385,307)
+DATA: (6,439,322)
+DATA: (7,442,328)
+DATA: (8,428,304)
+DATA: (9,412,311)
+DATA: (10,398,304)
+DATA: (11,422,307)
+DATA: (12,441,329)
+DATA: (13,417,314)
+DATA: (14,420,324)
+DATA: (15,387,279)
+DATA: (0,451,312)
+FROG POPULATION: 34
+FROG POPULATION: 33
+
+YEAR: 76
+FROG POPULATION: 33
+DATA: (1,411,404)
+DATA: (2,420,409)
+DATA: (3,402,395)
+DATA: (4,404,396)
+DATA: (5,439,428)
+DATA: (6,440,427)
+DATA: (7,422,408)
+DATA: (8,403,395)
+DATA: (9,420,415)
+DATA: (10,426,420)
+DATA: (11,435,425)
+DATA: (12,384,381)
+DATA: (13,478,465)
+DATA: (14,428,418)
+DATA: (15,419,413)
+DATA: (0,464,447)
+FROG POPULATION: 33
+FROG POPULATION: 34
+
+YEAR: 77
+FROG POPULATION: 32
+DATA: (1,403,394)
+DATA: (2,430,424)
+DATA: (3,411,406)
+DATA: (4,430,420)
+DATA: (5,444,435)
+DATA: (6,386,378)
+DATA: (7,412,400)
+DATA: (8,428,418)
+DATA: (9,450,439)
+DATA: (10,408,398)
+DATA: (11,444,437)
+DATA: (12,461,452)
+DATA: (13,428,420)
+DATA: (14,402,391)
+DATA: (15,418,403)
+DATA: (0,393,389)
+FROG POPULATION: 32
+FROG POPULATION: 32
+
+YEAR: 78
+FROG POPULATION: 33
+DATA: (1,408,402)
+DATA: (2,383,372)
+DATA: (3,356,346)
+DATA: (4,359,351)
+DATA: (5,409,400)
+DATA: (6,390,384)
+DATA: (7,353,347)
+DATA: (8,387,379)
+DATA: (9,390,382)
+DATA: (10,369,361)
+DATA: (11,385,375)
+DATA: (12,373,361)
+DATA: (13,381,372)
+DATA: (14,401,395)
+DATA: (15,406,399)
+DATA: (0,378,374)
+FROG POPULATION: 32
+FROG POPULATION: 31
+
+YEAR: 79
+FROG POPULATION: 31
+DATA: (1,330,315)
+DATA: (2,341,329)
+DATA: (3,356,335)
+DATA: (4,351,340)
+DATA: (5,352,333)
+DATA: (6,345,326)
+DATA: (7,352,336)
+DATA: (8,338,317)
+DATA: (9,348,332)
+DATA: (10,376,360)
+DATA: (11,354,340)
+DATA: (12,331,316)
+DATA: (13,342,328)
+DATA: (14,339,326)
+DATA: (15,361,345)
+DATA: (0,323,307)
+FROG POPULATION: 31
+FROG POPULATION: 32
+
+YEAR: 80
+FROG POPULATION: 33
+DATA: (1,325,306)
+DATA: (2,325,310)
+DATA: (3,310,295)
+DATA: (4,327,303)
+DATA: (5,267,254)
+DATA: (6,317,295)
+DATA: (7,313,302)
+DATA: (8,293,275)
+DATA: (9,291,276)
+DATA: (10,297,285)
+DATA: (11,328,305)
+DATA: (12,331,316)
+DATA: (13,304,296)
+DATA: (14,307,293)
+DATA: (15,289,277)
+DATA: (0,288,266)
+FROG POPULATION: 33
+FROG POPULATION: 33
+
+YEAR: 81
+FROG POPULATION: 31
+DATA: (1,305,292)
+DATA: (2,278,273)
+DATA: (3,316,308)
+DATA: (4,300,296)
+DATA: (5,305,294)
+DATA: (6,292,280)
+DATA: (7,288,279)
+DATA: (8,289,282)
+DATA: (9,286,284)
+DATA: (10,278,271)
+DATA: (11,265,258)
+DATA: (12,290,281)
+DATA: (13,283,276)
+DATA: (14,320,314)
+DATA: (15,307,298)
+DATA: (0,307,298)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 82
+FROG POPULATION: 30
+DATA: (3,84,84)
+DATA: (4,87,87)
+DATA: (6,76,75)
+DATA: (7,82,80)
+DATA: (8,93,90)
+DATA: (9,70,68)
+DATA: (10,98,95)
+DATA: (11,92,91)
+DATA: (12,77,76)
+DATA: (13,83,81)
+DATA: (14,80,80)
+DATA: (15,87,86)
+DATA: (0,104,101)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 83
+FROG POPULATION: 30
+DATA: (3,0,0)
+DATA: (4,0,0)
+DATA: (6,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (10,0,0)
+DATA: (11,0,0)
+DATA: (14,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 84
+FROG POPULATION: 30
+DATA: (3,0,0)
+DATA: (4,0,0)
+DATA: (6,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (10,0,0)
+DATA: (14,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 85
+FROG POPULATION: 30
+DATA: (3,0,0)
+DATA: (4,0,0)
+DATA: (6,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (10,0,0)
+DATA: (14,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 86
+FROG POPULATION: 30
+DATA: (3,0,0)
+DATA: (4,0,0)
+DATA: (6,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (10,0,0)
+DATA: (14,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 87
+FROG POPULATION: 30
+DATA: (4,0,0)
+DATA: (6,0,0)
+DATA: (7,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 88
+FROG POPULATION: 30
+DATA: (4,0,0)
+DATA: (6,0,0)
+DATA: (7,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 30
+FROG POPULATION: 30
+
+YEAR: 89
+FROG POPULATION: 30
+DATA: (6,0,0)
+DATA: (0,0,0)
+FROG POPULATION: 30
+DATA: (12,0,0)
+DATA: (13,0,0)
+DATA: (14,0,0)
+DATA: (15,0,0)
+DATA: (1,109,107)
+DATA: (2,82,81)
+DATA: (3,0,0)
+DATA: (4,0,0)
+DATA: (7,0,0)
+DATA: (8,0,0)
+DATA: (9,0,0)
+DATA: (10,0,0)
+DATA: (11,0,0)
+DATA: (1,0,0)
+DATA: (11,0,0)
+DATA: (12,0,0)
+DATA: (13,0,0)
+DATA: (2,0,0)
+DATA: (15,0,0)
+DATA: (8,0,0)
+DATA: (1,0,0)
+DATA: (13,0,0)
+DATA: (12,0,0)
+DATA: (11,0,0)
+DATA: (3,0,0)
+DATA: (14,0,0)
+DATA: (2,0,0)
+DATA: (9,0,0)
+DATA: (1,0,0)
+DATA: (13,0,0)
+DATA: (15,0,0)
+DATA: (11,0,0)
+DATA: (2,0,0)
+DATA: (12,0,0)
+DATA: (14,0,0)
+DATA: (1,0,0)
+DATA: (13,0,0)
+DATA: (8,0,0)
+DATA: (15,0,0)
+DATA: (10,0,0)
+DATA: (3,0,0)
+DATA: (11,0,0)
+DATA: (2,0,0)
+DATA: (9,0,0)
+DATA: (12,0,0)
+DATA: (1,0,0)
+DATA: (13,0,0)
+DATA: (15,0,0)
+DATA: (2,0,0)
+DATA: (11,0,0)
+DATA: (10,0,0)
+DATA: (12,0,0)
+DATA: (9,0,0)
+DATA: (1,0,0)
+DATA: (13,0,0)
+DATA: (2,0,0)
+DATA: (15,0,0)
+DATA: (12,0,0)
+DATA: (9,0,0)
+DATA: (1,0,0)
+DATA: (15,0,0)
+DATA: (2,0,0)
+DATA: (9,0,0)
+
+YEAR: 90
+FROG POPULATION: 31
+FROG POPULATION: 31
+DATA: (5,84,83)
+DATA: (5,0,0)
+DATA: (5,0,0)
+DATA: (5,0,0)
+DATA: (5,0,0)
+DATA: (5,0,0)
+DATA: (5,0,0)
+DATA: (5,0,0)
+DATA: (1,24,20)
+DATA: (2,24,21)
+DATA: (3,23,23)
+DATA: (4,41,41)
+DATA: (5,31,28)
+DATA: (6,27,26)
+DATA: (7,27,23)
+DATA: (8,31,30)
+DATA: (9,43,40)
+DATA: (10,31,30)
+DATA: (11,42,37)
+DATA: (12,31,30)
+DATA: (13,36,34)
+DATA: (14,43,39)
+DATA: (15,39,36)
+DATA: (0,19,18)
+FROG POPULATION: 31
+
+YEAR: 91
+FROG POPULATION: 30
+FROG POPULATION: 30
+DATA: (1,363,338)
+DATA: (2,401,380)
+DATA: (3,363,343)
+DATA: (4,393,375)
+DATA: (5,367,348)
+DATA: (6,362,339)
+DATA: (7,373,358)
+DATA: (8,366,345)
+DATA: (9,419,394)
+DATA: (10,380,358)
+DATA: (11,391,363)
+DATA: (12,416,396)
+DATA: (13,423,399)
+DATA: (14,359,341)
+DATA: (15,404,380)
+DATA: (0,388,372)
+FROG POPULATION: 31
+
+YEAR: 92
+FROG POPULATION: 29
+DATA: (1,353,345)
+DATA: (2,365,348)
+DATA: (3,335,324)
+DATA: (4,332,322)
+DATA: (5,346,330)
+DATA: (6,374,360)
+DATA: (7,369,357)
+DATA: (8,352,337)
+DATA: (9,371,354)
+DATA: (10,362,345)
+DATA: (11,398,381)
+DATA: (12,388,370)
+DATA: (13,387,373)
+DATA: (14,391,379)
+DATA: (15,406,393)
+DATA: (0,367,354)
+FROG POPULATION: 29
+FROG POPULATION: 27
+
+YEAR: 93
+FROG POPULATION: 27
+DATA: (1,333,333)
+DATA: (2,315,315)
+DATA: (3,326,326)
+DATA: (4,378,378)
+DATA: (5,302,302)
+DATA: (6,324,324)
+DATA: (7,317,317)
+DATA: (8,322,322)
+DATA: (9,385,385)
+DATA: (10,330,330)
+DATA: (12,341,341)
+DATA: (11,349,349)
+DATA: (13,327,327)
+DATA: (14,335,335)
+DATA: (15,326,326)
+DATA: (0,356,356)
+FROG POPULATION: 27
+FROG POPULATION: 26
+
+YEAR: 94
+FROG POPULATION: 27
+DATA: (1,337,335)
+DATA: (2,341,340)
+DATA: (3,356,354)
+DATA: (4,341,340)
+DATA: (5,322,320)
+DATA: (6,323,319)
+DATA: (7,327,323)
+DATA: (8,337,337)
+DATA: (9,316,315)
+DATA: (10,330,329)
+DATA: (11,361,359)
+DATA: (12,356,355)
+DATA: (13,334,333)
+DATA: (14,295,294)
+DATA: (15,345,344)
+DATA: (0,358,355)
+FROG POPULATION: 27
+FROG POPULATION: 26
+
+YEAR: 95
+FROG POPULATION: 26
+DATA: (1,336,329)
+DATA: (2,381,372)
+DATA: (3,340,330)
+DATA: (4,330,320)
+DATA: (5,355,347)
+DATA: (6,343,332)
+DATA: (7,333,325)
+DATA: (8,348,342)
+DATA: (10,357,352)
+DATA: (9,359,345)
+DATA: (11,354,344)
+DATA: (12,335,323)
+DATA: (13,335,325)
+DATA: (14,357,346)
+DATA: (15,367,359)
+DATA: (0,322,313)
+FROG POPULATION: 26
+FROG POPULATION: 25
+
+YEAR: 96
+FROG POPULATION: 24
+DATA: (1,333,329)
+DATA: (2,360,359)
+DATA: (3,354,351)
+DATA: (4,321,320)
+DATA: (5,341,336)
+DATA: (6,367,361)
+DATA: (7,332,330)
+DATA: (8,345,343)
+DATA: (9,328,324)
+DATA: (10,346,343)
+DATA: (11,371,367)
+DATA: (12,351,349)
+DATA: (13,314,311)
+DATA: (14,321,320)
+DATA: (15,348,345)
+DATA: (0,319,315)
+FROG POPULATION: 24
+FROG POPULATION: 24
+
+YEAR: 97
+FROG POPULATION: 24
+DATA: (1,327,327)
+DATA: (2,308,308)
+DATA: (3,345,345)
+DATA: (4,300,300)
+DATA: (5,351,351)
+DATA: (6,345,345)
+DATA: (7,278,278)
+DATA: (8,326,326)
+DATA: (9,341,341)
+DATA: (10,351,351)
+DATA: (11,289,289)
+DATA: (12,311,311)
+DATA: (13,352,352)
+DATA: (14,349,349)
+DATA: (15,323,323)
+DATA: (0,324,324)
+FROG POPULATION: 24
+FROG POPULATION: 24
+
+YEAR: 98
+FROG POPULATION: 23
+DATA: (1,293,288)
+DATA: (2,329,323)
+DATA: (3,322,319)
+DATA: (4,321,316)
+DATA: (5,302,302)
+DATA: (6,291,288)
+DATA: (7,321,320)
+DATA: (8,321,319)
+DATA: (9,307,303)
+DATA: (10,292,289)
+DATA: (11,316,310)
+DATA: (13,306,301)
+DATA: (12,295,293)
+DATA: (14,298,294)
+DATA: (15,344,343)
+DATA: (0,306,300)
+FROG POPULATION: 22
+FROG POPULATION: 20
+
+YEAR: 99
+FROG POPULATION: 20
+DATA: (1,313,313)
+DATA: (2,295,295)
+DATA: (3,276,276)
+DATA: (4,260,260)
+DATA: (5,265,265)
+DATA: (6,273,273)
+DATA: (7,298,298)
+DATA: (8,290,290)
+DATA: (10,272,272)
+DATA: (11,282,282)
+DATA: (12,286,286)
+DATA: (9,287,287)
+DATA: (13,260,260)
+DATA: (14,326,326)
+DATA: (15,309,309)
+DATA: (0,294,294)
+FROG POPULATION: 20
+FROG POPULATION: 20
+
+YEAR: 100
+FROG POPULATION: 20
+DATA: (1,255,255)
+DATA: (2,251,251)
+DATA: (3,282,282)
+DATA: (4,323,323)
+DATA: (5,278,278)
+DATA: (6,282,282)
+DATA: (7,251,251)
+DATA: (8,295,295)
+DATA: (10,299,299)
+DATA: (9,286,286)
+DATA: (11,254,254)
+DATA: (12,283,283)
+DATA: (13,292,292)
+DATA: (14,319,319)
+DATA: (15,275,275)
+DATA: (0,271,271)
+FROG POPULATION: 20
+FROG POPULATION: 19
+}
+
+\end{document}
