@@ -39,6 +39,9 @@ public:
     }
 
     ~Director() {
+        // Synchronize destructors
+        MPI_Barrier(_director_comm);
+
         // Empty out the actor queue
         empty_queue();
 
