@@ -30,7 +30,7 @@ public:
     void request_population_data(int tag) {
         Cell::PopulationDataRequest data;
         data.tag = tag;
-        data.reply = get_id();
+        data.reply = id();
 
         send_message<Cell::PopulationDataRequest>(
             cell_id, data, Cell::POPULATION_DATA
@@ -57,7 +57,7 @@ void test_population_count(void) {
             director.add_actor<TestPopulationCount>();
         Cell *cell = director.add_actor<Cell>();
 
-        test_registration->cell_id = cell->get_id();
+        test_registration->cell_id = cell->id();
 
         bool is_sick;
 
@@ -125,7 +125,7 @@ void test_poison_pill(void) {
 
         REQUIRE(!cell->is_dead());
 
-        test_pp->kill_cell(cell->get_id());
+        test_pp->kill_cell(cell->id());
         cell->main();
 
         REQUIRE(cell->is_dead());

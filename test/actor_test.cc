@@ -309,7 +309,7 @@ class CommunicationActor: public Actor {
 public:
     CommunicationActor(): parent(-1, -1) {}
     void main(void){
-        if(parent.rank == -1) {
+        if(parent.rank() == -1) {
             Message message;
             if(get_message(&message)) {
                 parent = message.data<Id>();
@@ -333,7 +333,7 @@ public:
         if(!initialized) {
             my_child = give_birth<CommunicationActor>();
 
-            Id my_id = get_id();
+            Id my_id = id();
             send_message<Id>(my_child, my_id, 0);
 
             initialized = true;

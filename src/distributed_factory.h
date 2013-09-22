@@ -54,11 +54,11 @@ public:
 
         int request[3] = {
             factory_id,
-            child_id.rank, child_id.id,
+            child_id.rank(), child_id.gid(),
         };
 
         MPI_Bsend(
-            request, 3, MPI_INT, child_id.rank,
+            request, 3, MPI_INT, child_id.rank(),
             BIRTH_REQUEST, _distributer_comm
         );
 

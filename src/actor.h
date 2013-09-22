@@ -38,7 +38,9 @@ public:
 
     virtual ~Actor(){}
 
+    // The main function that must be overloaded when defining a new actor.
     virtual void main()=0;
+
 
     // Check if the actor is dead.
     bool is_dead(void) {
@@ -46,7 +48,7 @@ public:
     }
 
     // Get the id of this actor.
-    Id get_id(void) {
+    Id id(void) {
         return _id;
     }
 
@@ -80,7 +82,11 @@ public:
         }
     };
 
-    // Send a tagged message to another actor.
+    /**
+     * Send a tagged message to another actor.
+     */
+
+    // Send an array of data
     template<class T>
     void send_message(Id const& actor_id, T *data, size_t data_count, int tag) {
         Message::MetaData metadata;
@@ -89,9 +95,12 @@ public:
         metadata.tag       = tag;
 
         Message::send_message<T, Message::MetaData>(
-            actor_id.rank, actor_id.id, data, data_count, &metadata, _comm
+            actor_id.rank(), actor_id.gid(),
+            data, data_count, &metadata, _comm
         );
     }
+
+    // Send an individual datum
     template<class T>
     void send_message(Id const& actor_id, T data, int tag) {
         send_message<T>(actor_id, &data, 1, tag);
@@ -100,11 +109,11 @@ public:
 
     // Check and receive a message if one is waiting.
     bool get_message(Message* my_message) {
-        return my_message->receive_message(MPI_ANY_SOURCE, _id.id, _comm);
+        return my_message->receive_message(MPI_ANY_SOURCE, _id.gid(), _comm);
     }
 
 private:
-    // Initialize an actor with a given id, parent id, communicator
+    // Initialize an actor with a given id, communicator
     // and distributed factory.
     void initialize_comms(
         Id id, MPI_Comm comm,
@@ -119,7 +128,7 @@ private:
     // Death state of an actor.
     bool _is_dead;
 
-    // Ids of actor and its parent.
+    // Ids of the actor.
     Id _id;
 
     // Communicator to send messages over.

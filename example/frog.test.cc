@@ -25,7 +25,7 @@ public:
     }
 
     void send_register_actor(Id frog_id) {
-        Id my_id = get_id();
+        Id my_id = id();
         send_message<Id>(frog_id, my_id, Frog::REGISTER_ACTOR);
     }
 
@@ -77,19 +77,19 @@ void test_frog_setup(void) {
         }
 
         for(int i=0; i<grid.num_cells; i++) {
-            grid.cell_ids[i] = cells[i]->get_id();
+            grid.cell_ids[i] = cells[i]->id();
         }
 
         // Send frog tracker id
-        test->send_register_actor(frog->get_id());
+        test->send_register_actor(frog->id());
 
         // Send cell data to frog and receive it
-        test->send_grid(grid.cell_ids, grid.num_cells, frog->get_id());
+        test->send_grid(grid.cell_ids, grid.num_cells, frog->id());
         frog->main();
 
         for(int i=0; i<grid.num_cells; i++) {
-            REQUIRE(frog->cell_list(i).rank == cells[i]->get_id().rank);
-            REQUIRE(frog->cell_list(i).id   == cells[i]->get_id().id);
+            REQUIRE(frog->cell_list(i).rank() == cells[i]->id().rank());
+            REQUIRE(frog->cell_list(i).gid()   == cells[i]->id().gid());
         }
 
         // Require that frog has done nothing until initial
@@ -104,7 +104,7 @@ void test_frog_setup(void) {
         // Set initial position and return cell data
         float coord_x = 0.1;
         float coord_y = 0.2;
-        test->send_starting_position(coord_x, coord_y, frog->get_id());
+        test->send_starting_position(coord_x, coord_y, frog->id());
         frog->main();
 
         // Frog should wait until cells have replied with population data
@@ -147,13 +147,13 @@ void test_frog_cell_interaction(void) {
         }
 
         for(int i=0; i<grid.num_cells; i++) {
-            grid.cell_ids[i] = cells[i]->get_id();
+            grid.cell_ids[i] = cells[i]->id();
         }
 
         // Send cell data to frog and receive it
-        test->send_grid(grid.cell_ids, grid.num_cells, frog->get_id());
-        test->send_starting_position(0.0, 0.0, frog->get_id());
-        test->send_register_actor(frog->get_id());
+        test->send_grid(grid.cell_ids, grid.num_cells, frog->id());
+        test->send_starting_position(0.0, 0.0, frog->id());
+        test->send_register_actor(frog->id());
         frog->main();
 
         // Update cells after frog hop
@@ -196,7 +196,7 @@ void test_frog_cell_interaction(void) {
                 initialInfectionLevel   += cells[i]->infectionLevel();
             }
 
-            test->send_infection_status(true, frog->get_id());
+            test->send_infection_status(true, frog->id());
             frog->main();
 
             int finalPopulationInflux = 0;
@@ -228,12 +228,12 @@ void test_frog_cell_history(void) {
         Cell *test_cell = director.add_actor<Cell>();
 
         for(int i=0; i<grid.num_cells; i++) {
-            grid.cell_ids[i] = test_cell->get_id();
+            grid.cell_ids[i] = test_cell->id();
         }
 
         // Send cell data to frog
-        test->send_grid(grid.cell_ids, grid.num_cells, frog->get_id());
-        test->send_starting_position(0.0, 0.0, frog->get_id());
+        test->send_grid(grid.cell_ids, grid.num_cells, frog->id());
+        test->send_starting_position(0.0, 0.0, frog->id());
 
         int totalPopulationInflux = 0;
         for(int i=0; i<Frog::test_birth_hop_count; i++) {
@@ -267,9 +267,9 @@ void test_frog_cell_history(void) {
         for(int i=0; i<2*Frog::infectionLevel_history_length; i++) {
             // Make some obvious pattern to track
             if (i<10 || i%2 == 0) {
-                test->send_infection_status(true, frog->get_id());
+                test->send_infection_status(true, frog->id());
             } else {
-                test->send_infection_status(true, frog->get_id());
+                test->send_infection_status(true, frog->id());
             }
 
             frog->main();
@@ -310,13 +310,13 @@ void test_sick_frogs(void) {
         Cell *test_cell = director.add_actor<Cell>();
 
         for(int i=0; i<grid.num_cells; i++) {
-            grid.cell_ids[i] = test_cell->get_id();
+            grid.cell_ids[i] = test_cell->id();
         }
 
         // Send cell data to frogs
-        test->send_grid(grid.cell_ids, grid.num_cells, frog->get_id());
-        test->send_starting_position(0.0, 0.0, frog->get_id());
-        test->send_register_actor(frog->get_id());
+        test->send_grid(grid.cell_ids, grid.num_cells, frog->id());
+        test->send_starting_position(0.0, 0.0, frog->id());
+        test->send_register_actor(frog->id());
 
 
         // Run for far longer than the frog is expected to live
@@ -332,10 +332,10 @@ void test_sick_frogs(void) {
         REQUIRE(!frog->is_dead());
 
         // Set frog history to a highly infected state
-        test->set_cell_population(0, 500000, test_cell->get_id());
+        test->set_cell_population(0, 500000, test_cell->id());
         test_cell->main();
         REQUIRE(test_cell->infectionLevel() == 500000);
-        test->send_infection_status(false, frog->get_id());
+        test->send_infection_status(false, frog->id());
         for(int i=0; i<Frog::infectionLevel_history_length; i++) {
             frog->main();
         }
@@ -383,20 +383,20 @@ void test_frog_birth(void) {
 
         Grid grid;
         for(int i=0; i<grid.num_cells; i++) {
-            grid.cell_ids[i] = test_cell->get_id();
+            grid.cell_ids[i] = test_cell->id();
         }
 
         // Send cell data to frogs
-        test->send_grid(grid.cell_ids, grid.num_cells, frog->get_id());
-        test->send_starting_position(0.0, 0.0, frog->get_id());
-        test->send_register_actor(frog->get_id());
+        test->send_grid(grid.cell_ids, grid.num_cells, frog->id());
+        test->send_starting_position(0.0, 0.0, frog->id());
+        test->send_register_actor(frog->id());
 
         // Expect frog to register its birth
         frog->main();
         REQUIRE(test->receive_registration() == 1);
 
         // Set population influx to the value of (almost) maximum probability
-        test->set_cell_population(2000, 0, test_cell->get_id());
+        test->set_cell_population(2000, 0, test_cell->id());
         test_cell->main();
         REQUIRE(test_cell->populationInflux() == 2000);
     }
@@ -431,7 +431,7 @@ void test_frog_birth(void) {
         while(test->receive_registration() != -1);
 
         // Send kill signal to frog
-        test->kill_frog(frog->get_id());
+        test->kill_frog(frog->id());
         frog->main();
 
         // Expect a death registration

@@ -8,14 +8,29 @@ namespace ActorModel {
 /**
  * Id
  *
- * The id class is used throughout ActorModel to refer to instances of
+ * The Id class is used throughout ActorModel to refer to instances of
  * actors in the system. It quickly identifies actors by providing
- * the rank on which they live and an id (hopefully) unique to them.
+ * the rank on which they live and a gid (hopefully) unique to them.
  */
 class Id {
 public:
-    Id(): rank(0), id(0) {}
-    Id(int rank_in, int id_in): rank(rank_in), id(id_in) {}
+    // Initialize an empty Id
+    Id(): _rank(0), _gid(0) {}
+
+    // Initialize an Id with a given rank and gid.
+    Id(int rank_in, int gid_in): _rank(rank_in), _gid(gid_in) {}
+
+
+    // Accessor for _rank
+    int rank() const {
+        return _rank;
+    }
+
+    // Accessor for _gid
+    int gid() const {
+        return _gid;
+    }
+
 
     /**
      * Get an id, guaranteed to be unique across all processes
@@ -26,26 +41,27 @@ public:
      * processes.
      */
     static int new_global_id(void) {
-        static int last_id = -1;
+        static int last_gid = -1;
         static int mpi_rank;
         static int mpi_size;
 
         // If uninitialized, initialize
-        if(last_id == -1) {
+        if(last_gid == -1) {
             MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
             MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
 
-            last_id = mpi_rank;
+            last_gid = mpi_rank;
         }
 
-        last_id += mpi_size;
+        last_gid += mpi_size;
 
-        return last_id;
+        return last_gid;
     }
 
 
-    int rank;
-    int id;
+private:
+    int _rank;
+    int _gid;
 };
 
 

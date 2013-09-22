@@ -282,7 +282,7 @@ private:
 
         Cell::PopulationDataRequest data;
         data.tag = POPULATION_DATA;
-        data.reply = get_id();
+        data.reply = id();
 
         send_message<Cell::PopulationDataRequest>(
             _cell_list[cell_num], data, Cell::POPULATION_DATA
