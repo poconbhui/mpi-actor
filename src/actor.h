@@ -23,7 +23,9 @@ namespace ActorModel {
  * much of the initialization and execution of actors.
  */
 class Actor {
+
 friend class Director;
+
 public:
 
     /**
@@ -34,34 +36,44 @@ public:
      * No communications or births should be requested in the constructor
      * or the destructor.
      */
+
+    // Constructor
     Actor(): _is_dead(false), _id() {}
 
+    // Destructor
     virtual ~Actor(){}
 
     // The main function that must be overloaded when defining a new actor.
     virtual void main()=0;
 
 
+    // Request this actor dies.
+    void die(void) {
+        _is_dead = true;
+    }
+
     // Check if the actor is dead.
     bool is_dead(void) {
         return _is_dead;
     }
+
 
     // Get the id of this actor.
     Id id(void) {
         return _id;
     }
 
-    // Request this actor dies.
-    void die(void) {
-        _is_dead = true;
-    }
 
     // Give birth to a child. The id of the child is returned immediately.
     template<class T>
     Id give_birth(void) {
         return _distributed_factory->request_distributed_child<T>();
     }
+
+
+    /**
+     * Pieces for sending tagged messages between actors
+     */
 
     // Message type sent between actors.
     class Message: public CompoundMessage {
@@ -81,10 +93,6 @@ public:
             return metadata<MetaData>().tag;
         }
     };
-
-    /**
-     * Send a tagged message to another actor.
-     */
 
     // Send an array of data
     template<class T>
@@ -106,13 +114,14 @@ public:
         send_message<T>(actor_id, &data, 1, tag);
     }
 
-
     // Check and receive a message if one is waiting.
     bool get_message(Message* my_message) {
         return my_message->receive_message(MPI_ANY_SOURCE, _id.gid(), _comm);
     }
 
+
 private:
+
     // Initialize an actor with a given id, communicator
     // and distributed factory.
     void initialize_comms(
@@ -120,7 +129,6 @@ private:
         DistributedFactory<Actor> *distributed_factory
     ) {
         _id = id;
-
         _comm = comm;
         _distributed_factory = distributed_factory;
     }
