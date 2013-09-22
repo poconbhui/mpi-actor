@@ -40,9 +40,10 @@ public:
     int data_size(void) { return _data.size()/sizeof(T); }
     int data_size(void) { return _data.size(); }
 
+
     // Receive metadata from received message.
     // This does a straight cast of data, so be sure you
-    // know what type data you've received.
+    // know what type data you've received!
     template<class T>
     T metadata(void) {
         return *reinterpret_cast<T*>(&_metadata[0]);
@@ -105,67 +106,80 @@ public:
 
     // Receive a compound message.
     bool receive_message(int source, int tag, MPI_Comm comm) {
-        int flag;
+        enum { msg_waiting = 1 };
+
+        int msg_state;
         MPI_Status status;
+        int count;
 
-        MPI_Iprobe(source, tag, comm, &flag, &status);
+        // Check if a message is waiting
+        MPI_Iprobe(source, tag, comm, &msg_state, &status);
 
-        // If there is a message waiting
-        if(flag == 1) {
-            int count;
+        if(msg_state == msg_waiting) {
 
             // Need to do this in case source or tag were
             // MPI_ANY_SOURCE or MPI_ANY_TAG
             source = status.MPI_SOURCE;
             tag    = status.MPI_TAG;
 
-            /*
-             * Receive Metadata
-             */
-            MPI_Get_count(&status, MPI_BYTE, &count);
-            if(count == MPI_UNDEFINED) return false;
+            receive_individual(source, tag, comm, &_metadata)
+            receive_individual(source, tag, comm, &_data)
 
-            _metadata.resize(count);
-
-            MPI_Recv(
-                &_metadata[0], count, MPI_BYTE,
-                source, tag, comm,
-                MPI_STATUS_IGNORE
-            );
-
-
-            /*
-             * Receive Data
-             */
-
-            // Get size of incoming data
-            MPI_Probe(source, tag, comm, &status);
-
-            MPI_Get_count(&status, MPI_BYTE, &count);
-            if(count == MPI_UNDEFINED) return false;
-
-            _data.resize(count);
-            //resize_data(count);
-
-            MPI_Recv(
-                &_data[0], count, MPI_BYTE,
-                source, tag, comm,
-                &status
-            );
-
-
-            /*
-             * Set sender details of message
-             */
             _source = source;
             _tag    = tag;
         }
 
-        return (flag == 1);
+        return (msg_state == msg_waiting);
     }
 
 
 private:
+
+    /**
+     * Receive an individual message into the given data vector.
+     */
+    bool receive_individual(
+        int source, int tag, MPI_Comm comm, std::vector<char> *data
+    ) {
+        MPI_Status status;
+        int count;
+
+
+        /**
+         * Get size of incoming data
+         *
+         * Get size in bytes. _data and _metadata containers
+         * are in char, which roughly translates to MPI_BYTE.
+         *
+         * MPI_BYTE is specifically used, because MPI_CHAR can
+         * perform some unexpected byte swapping on hetrogeneous
+         * architectures.
+         * This is unwelcome because we are reading bytes directly
+         * and unsafely casting them to the expected data type.
+         */
+        MPI_Probe(source, tag, comm, &status);
+        MPI_Get_count(&status, MPI_BYTE, &count);
+
+        // If count undefined, exit early
+        if(count == MPI_UNDEFINED) return false;
+
+
+        /*
+         * Resize data and receive
+         */
+        data->resize(count);
+
+        MPI_Recv(
+            &(data->operator[](0)), count, MPI_BYTE,
+            source, tag, comm,
+            &status
+        );
+
+
+        return true;
+    }
+
+
     // Vectors storing message data
     std::vector<char> _metadata;
     std::vector<char> _data;
