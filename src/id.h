@@ -14,6 +14,7 @@ namespace ActorModel {
  */
 class Id {
 public:
+
     // Initialize an empty Id
     Id(): _rank(0), _gid(0) {}
 
@@ -22,12 +23,12 @@ public:
 
 
     // Accessor for _rank
-    int rank() const {
+    int rank(void) const {
         return _rank;
     }
 
     // Accessor for _gid
-    int gid() const {
+    int gid(void) const {
         return _gid;
     }
 
@@ -60,6 +61,7 @@ public:
 
 
 private:
+
     int _rank;
     int _gid;
 };
