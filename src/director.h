@@ -24,12 +24,15 @@ namespace ActorModel {
  */
 class Director {
 public:
+
     Director(MPI_Comm comm_in=MPI_COMM_WORLD, int sync_interval=1):
         _actor_distributer(comm_in),
         _is_ended(false),
         _sync_interval(sync_interval),
         _tick_count(0)
     {
+        // Constructor synchronized by MPI_Com_dup
+
         // Set up MPI communicators and data
         MPI_Comm_dup(comm_in, &_actor_comm);
         MPI_Comm_dup(comm_in, &_director_comm);
@@ -39,6 +42,7 @@ public:
     }
 
     ~Director() {
+
         // Synchronize destructors
         MPI_Barrier(_director_comm);
 
@@ -64,12 +68,15 @@ public:
             int flag;
             MPI_Status status;
 
+            // Check if any outstanding messages
             MPI_Iprobe(
                 MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm, &flag,
                 &status
             );
 
             while(flag) {
+
+                // Get the outstanding message
                 int count;
                 MPI_Get_count(&status, MPI_INT, &count);
                 int msg[count];
@@ -78,6 +85,7 @@ public:
                     _director_comm, MPI_STATUS_IGNORE
                 );
 
+                // Check for more outstanding messages
                 MPI_Iprobe(
                     MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm, &flag,
                     &status
@@ -87,6 +95,7 @@ public:
         }
 
 
+        // Free all communicators
         MPI_Comm_free(&_actor_comm);
         MPI_Comm_free(&_director_comm);
     }
