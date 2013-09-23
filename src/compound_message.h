@@ -2,43 +2,43 @@
 #define ACTOR_COMPOUND_MESSAGE_H_
 
 
+#include "./message.h"
+
+
 namespace ActorModel {
 
 
 /**
  * CompoundMessage
  *
- * This class handles memory allocation for sending and receiving
- * messages, and also sends and receives 2 messages in a row to specific tags.
+ * This class sends and receives 2 messages in a row to specific tags.
+ * It is expected to be used exclusively on a particular communicator
+ * as it makes the assumption that all messages passed on this communicator
+ * are passed in pairs.
  *
- * Either a simple copy operator can be used to retreive data, or
- * an array pointer can be passed in with a length, and that many
- * elements will be copied to the pointer using the copy operator.
- *
- * Metadata is limited to fixed types.
- *
- * This passes messages using MPI_BYTE, so it likely won't work on
- * a hetrogenous system!
- * It also assumes that the size of the MPI_BYTE data type is the
- * same as char.
- *
- * This class assumes that std::vector holds data in contiguous memory.
- * There is a slightly fluffy line in the pre 2003 standard that
- * a vendor could use to justify using non-contiguous memory,
- * but it is believed that none have done so.
- * If this were the case, hopefully the tests for this class should fail.
+ * It sends Metadata and Data types.
+ * Metadata is limited to fixed types, but Data types may be fixed or
+ * array types.
  */
 class CompoundMessage {
 public:
 
     // Get data sizes
     template<class T>
-    int metadata_size(void) { return _metadata.size()/sizeof(T); }
-    int metadata_size(void) { return _metadata.size(); }
+    int metadata_size(void) {
+        return _metadata.data_size<T>();
+    }
+    int metadata_size(void) {
+        return _metadata.data_size();
+    }
 
     template<class T>
-    int data_size(void) { return _data.size()/sizeof(T); }
-    int data_size(void) { return _data.size(); }
+    int data_size(void) {
+        return _data.data_size<T>();
+    }
+    int data_size(void) {
+        return _data.data_size();
+    }
 
 
     // Receive metadata from received message.
@@ -46,29 +46,25 @@ public:
     // know what type data you've received!
     template<class T>
     T metadata(void) {
-        return *reinterpret_cast<T*>(&_metadata[0]);
+        return _metadata.data<T>();
     }
 
     // Receive data from received message. Same caveat as above.
     template<class T>
     T data(void) {
-        return *reinterpret_cast<T*>(&_data[0]);
+        return _data.data<T>();
     }
 
     // Receive array data from received message.
     template<class T>
     void data(T *buffer, size_t count) {
-        T *t_data = reinterpret_cast<T*>(&_data[0]);
-
-        for(size_t i=0; i<count; i++) {
-            buffer[i] = t_data[i];
-        }
+        _data.data<T>(buffer, count);
     }
 
 
     // Find some information about the message.
-    int source(void) { return _source; }
-    int tag(void) { return _tag; }
+    int source(void) { return _metadata.source(); }
+    int tag(void) { return _metadata.tag(); }
 
 
     // Send a compound message
@@ -79,18 +75,10 @@ public:
         MDT *metadata, MPI_Comm comm
     ) {
         // Send metadata
-        MPI_Bsend(
-            metadata, sizeof(MDT), MPI_BYTE,
-            send_rank, send_tag,
-            comm
-        );
+        Message::send<MDT>(send_rank, send_tag, metadata, 1, comm);
 
         // Send data
-        MPI_Bsend(
-            data, data_count*sizeof(DT), MPI_BYTE,
-            send_rank, send_tag,
-            comm
-        );
+        Message::send<DT>(send_rank, send_tag, data, data_count, comm);
     }
 
     // Send a single data message
@@ -106,87 +94,28 @@ public:
 
     // Receive a compound message.
     bool receive_message(int source, int tag, MPI_Comm comm) {
-        enum { msg_waiting = 1 };
 
-        int msg_state;
-        MPI_Status status;
-        int count;
+        if(Status(source, tag, comm).is_waiting()) {
 
-        // Check if a message is waiting
-        MPI_Iprobe(source, tag, comm, &msg_state, &status);
+            if(!_metadata.receive(source, tag, comm)) {
+                return false;
+            }
+            if(!_data.receive(_metadata.source(), _metadata.tag(), comm)) {
+                return false;
+            }
 
-        if(msg_state == msg_waiting) {
-
-            // Need to do this in case source or tag were
-            // MPI_ANY_SOURCE or MPI_ANY_TAG
-            source = status.MPI_SOURCE;
-            tag    = status.MPI_TAG;
-
-            receive_individual(source, tag, comm, &_metadata)
-            receive_individual(source, tag, comm, &_data)
-
-            _source = source;
-            _tag    = tag;
+            return true;
         }
 
-        return (msg_state == msg_waiting);
+        return false;
     }
 
 
 private:
 
-    /**
-     * Receive an individual message into the given data vector.
-     */
-    bool receive_individual(
-        int source, int tag, MPI_Comm comm, std::vector<char> *data
-    ) {
-        MPI_Status status;
-        int count;
-
-
-        /**
-         * Get size of incoming data
-         *
-         * Get size in bytes. _data and _metadata containers
-         * are in char, which roughly translates to MPI_BYTE.
-         *
-         * MPI_BYTE is specifically used, because MPI_CHAR can
-         * perform some unexpected byte swapping on hetrogeneous
-         * architectures.
-         * This is unwelcome because we are reading bytes directly
-         * and unsafely casting them to the expected data type.
-         */
-        MPI_Probe(source, tag, comm, &status);
-        MPI_Get_count(&status, MPI_BYTE, &count);
-
-        // If count undefined, exit early
-        if(count == MPI_UNDEFINED) return false;
-
-
-        /*
-         * Resize data and receive
-         */
-        data->resize(count);
-
-        MPI_Recv(
-            &(data->operator[](0)), count, MPI_BYTE,
-            source, tag, comm,
-            &status
-        );
-
-
-        return true;
-    }
-
-
-    // Vectors storing message data
-    std::vector<char> _metadata;
-    std::vector<char> _data;
-
-    // Data about origins of last message
-    int _source;
-    int _tag;
+    // metadata and data messages
+    Message _metadata;
+    Message _data;
 };
 
 

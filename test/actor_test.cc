@@ -6,6 +6,100 @@
 using namespace ActorModel;
 
 
+struct TestMessageDataType {
+    int a;
+    int b;
+    double c;
+};
+
+void test_message(void) {
+    MPI_Comm comm;
+    MPI_Comm_dup(MPI_COMM_WORLD, &comm);
+
+    Message message;
+
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    int send_rank = (rank+1)%size;
+    int recv_rank = (rank-1+size)%size;
+
+
+    // Send a number of messages
+    for(int send_tag=0; send_tag < 5; send_tag++) {
+        TestMessageDataType data1 = {rank, send_tag, 0.1};
+
+        Message::send<TestMessageDataType>(
+            send_rank, send_tag, &data1, 1, comm
+        );
+    }
+
+    // Ensure all messages have sent.
+    MPI_Barrier(comm);
+
+    // Run through tags backwards to ensure tag is important and not
+    // message send/receive order
+    for(int recv_tag=4; recv_tag >= 0; recv_tag--) {
+        message.receive(MPI_ANY_SOURCE, recv_tag, comm);
+
+        REQUIRE(
+            message.data_size() == sizeof(TestMessageDataType)
+        );
+        REQUIRE(
+            message.data_size<TestMessageDataType>() == 1
+        );
+
+        REQUIRE(message.source() == recv_rank);
+        REQUIRE(message.tag() == recv_tag);
+
+        TestMessageDataType data1 = message.data<TestMessageDataType>();
+
+        REQUIRE(data1.a == recv_rank);
+        REQUIRE(data1.b == recv_tag);
+        REQUIRE(sqt_fleq(data1.c, 0.1));
+    }
+
+    REQUIRE(!Status(MPI_ANY_SOURCE, MPI_ANY_TAG, comm).is_waiting());
+    REQUIRE(!message.receive(MPI_ANY_SOURCE, MPI_ANY_TAG, comm));
+
+    // Ensure all messages have been exchanged
+    MPI_Barrier(comm);
+
+    // Test array sending and receiving
+    int array1_size = 10;
+    int array1[array1_size];
+
+    for(int i=0; i<array1_size; i++) {
+        array1[i] = i;
+    }
+
+    // Send and receive message
+    Message::send<int>(
+        send_rank, 0, array1, array1_size, comm
+    );
+
+    // Ensure all messages are sent
+    MPI_Barrier(comm);
+    
+    message.receive(MPI_ANY_SOURCE, 0, comm);
+
+    REQUIRE(message.data_size<int>() == array1_size);
+
+    int recv_array1[array1_size];
+
+    message.data(recv_array1, array1_size);
+
+    for(int i=0; i<array1_size; i++) {
+        REQUIRE(recv_array1[i] == array1[i]);
+    }
+
+
+    MPI_Comm_free(&comm);
+}
+
+
+
 struct TestCompoundMessageDataType1 {
     int a;
     int b;
@@ -470,6 +564,8 @@ int main(int argc, char* argv[]) {
 
     INIT_SQT();
 
+    RUN_TEST(test_message);
+
     RUN_TEST(test_compound_message);
 
     RUN_TEST(test_global_ids);
@@ -481,6 +577,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(test_distributed_factory);
 
     RUN_TEST(test_actor_communication);
+
     RUN_TEST(test_actor_birth_and_death);
 
     MPI_Finalize();
