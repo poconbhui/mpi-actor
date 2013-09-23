@@ -49,49 +49,16 @@ public:
         // Empty out the actor queue
         empty_queue();
 
-        /*
-         * Clean up all outstanding messages
-         */
-
         // Clean up actor messages
         {
-            CompoundMessage message;
-            while(
-                message.receive_message(
-                    MPI_ANY_SOURCE, MPI_ANY_TAG, _actor_comm
-                )
-            );
+            Message message;
+            while(message.receive(MPI_ANY_SOURCE, MPI_ANY_TAG, _actor_comm));
         }
 
         // Clean up director messages
         {
-            int flag;
-            MPI_Status status;
-
-            // Check if any outstanding messages
-            MPI_Iprobe(
-                MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm, &flag,
-                &status
-            );
-
-            while(flag) {
-
-                // Get the outstanding message
-                int count;
-                MPI_Get_count(&status, MPI_INT, &count);
-                int msg[count];
-                MPI_Recv(
-                    &msg, count, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG,
-                    _director_comm, MPI_STATUS_IGNORE
-                );
-
-                // Check for more outstanding messages
-                MPI_Iprobe(
-                    MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm, &flag,
-                    &status
-                );
-
-            }
+            Message message;
+            while(message.receive(MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm));
         }
 
 
@@ -207,13 +174,10 @@ private:
 
     // Check if any directors on any processes have died.
     bool get_global_ended(void) {
-        int flag;
-        MPI_Iprobe(
-            MPI_ANY_SOURCE, END, _director_comm, &flag, MPI_STATUS_IGNORE
-        );
+        Status status(MPI_ANY_SOURCE, END, _director_comm);
 
         int global_done = 0;
-        if(flag == 1) {
+        if(status.is_waiting()) {
             MPI_Recv(
                 &global_done, 1, MPI_INT,
                 MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm,

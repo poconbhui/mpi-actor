@@ -5,6 +5,7 @@
 
 #include "./factory.h"
 #include "./id.h"
+#include "./status.h"
 
 namespace ActorModel {
 
@@ -68,13 +69,9 @@ public:
     // Check if there are any outstanding requests for a child to be
     // created.
     bool is_child_waiting(void) {
-        int flag;
-        MPI_Iprobe(
-            MPI_ANY_SOURCE, BIRTH_REQUEST, _distributer_comm,
-            &flag,
-            MPI_STATUS_IGNORE
-        );
-        return flag;
+        Status status(MPI_ANY_SOURCE, BIRTH_REQUEST, _distributer_comm);
+
+        return status.is_waiting();
     }
 
 
