@@ -147,7 +147,7 @@ public:
     void end(void) {
         for(int i=0; i<_comm_size; i++) {
             int is_ended = 1;
-            MPI_Bsend(&is_ended, 1, MPI_INT, i, END, _director_comm);
+            Message::send<int>(i, END, is_ended, _director_comm);
         }
     }
 

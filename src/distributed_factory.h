@@ -5,7 +5,7 @@
 
 #include "./factory.h"
 #include "./id.h"
-#include "./status.h"
+#include "./message.h"
 
 namespace ActorModel {
 
@@ -58,13 +58,13 @@ public:
             child_id.rank(), child_id.gid(),
         };
 
-        MPI_Bsend(
-            request, 3, MPI_INT, child_id.rank(),
-            BIRTH_REQUEST, _distributer_comm
+        Message::send<int>(
+            child_id.rank(), BIRTH_REQUEST, request, 3, _distributer_comm
         );
 
         return child_id;
     }
+
 
     // Check if there are any outstanding requests for a child to be
     // created.
@@ -126,14 +126,14 @@ public:
         return id;
     }
 
+
 private:
+
     // Receive data from an incoming message
     void get_requested_child_data(int request[3]) {
-        MPI_Recv(
-            request, 3, MPI_INT,
-            MPI_ANY_SOURCE, BIRTH_REQUEST, _distributer_comm,
-            MPI_STATUS_IGNORE
-        );
+        Message message;
+        message.receive(MPI_ANY_SOURCE, BIRTH_REQUEST, _distributer_comm);
+        message.data<int>(request, 3);
     }
 
     MPI_Comm _distributer_comm;

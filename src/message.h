@@ -80,11 +80,11 @@ public:
     }
 
     // Send a single data message
-    template<class DT, class MDT>
+    template<class DT>
     static void send(
         int send_rank, int send_tag, DT &data, MPI_Comm comm
     ) {
-        send<DT>(send_rank, send_tag, data, 1, comm);
+        send<DT>(send_rank, send_tag, &data, 1, comm);
     }
 
 
