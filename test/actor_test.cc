@@ -116,7 +116,7 @@ void test_compound_message(void) {
     MPI_Comm comm;
     MPI_Comm_dup(MPI_COMM_WORLD, &comm);
 
-    CompoundMessage message;
+    ActorMessage message;
 
     int rank, size;
     MPI_Comm_rank(comm, &rank);
@@ -557,10 +557,8 @@ void test_actor_birth_and_death(void) {
 
 
 int main(int argc, char* argv[]) {
-    MPI_Init(&argc, &argv);
-
-    int *buffer = new int[1000];
-    MPI_Buffer_attach(buffer, 1000*sizeof(int));
+    Director::initialize(&argc, &argv);
+    Director::set_buffer_size(1000*sizeof(int));
 
     INIT_SQT();
 
@@ -580,5 +578,5 @@ int main(int argc, char* argv[]) {
 
     RUN_TEST(test_actor_birth_and_death);
 
-    MPI_Finalize();
+    Director::finalize();
 }

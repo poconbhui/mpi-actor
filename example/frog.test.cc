@@ -461,11 +461,8 @@ void test_frog_birth(void) {
 
 
 int main(int argc, char *argv[]) {
-    MPI_Init(&argc, &argv);
-
-    void* buffer = ::operator new(100000);
-    MPI_Buffer_attach(buffer, 100000);
-
+    Director::initialize(&argc, &argv);
+    Director::set_buffer_size(100000);
 
     INIT_SQT();
 
@@ -475,5 +472,5 @@ int main(int argc, char *argv[]) {
     RUN_TEST(test_sick_frogs);
     RUN_TEST(test_frog_birth);
 
-    MPI_Finalize();
+    Director::finalize();
 }

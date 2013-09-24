@@ -67,6 +67,25 @@ public:
         MPI_Comm_free(&_director_comm);
     }
 
+    static void initialize(int* argc, char **argv[]) {
+        MPI_Init(argc, argv);
+    }
+
+    static void finalize(void) {
+        MPI_Finalize();
+    }
+
+    static void set_buffer_size(size_t buffer_size) {
+        static void *buffer = NULL;
+        
+        if(buffer != NULL) {
+            ::operator delete(buffer);
+        }
+        
+        buffer = ::operator new(buffer_size);
+        MPI_Buffer_attach(buffer, buffer_size);
+    }
+
     // Define a root director to easily run stuff on just one process
     bool is_root(void) {
         return _comm_rank == 0;
@@ -174,15 +193,11 @@ private:
 
     // Check if any directors on any processes have died.
     bool get_global_ended(void) {
-        Status status(MPI_ANY_SOURCE, END, _director_comm);
+        Message message;
 
         int global_done = 0;
-        if(status.is_waiting()) {
-            MPI_Recv(
-                &global_done, 1, MPI_INT,
-                MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm,
-                MPI_STATUS_IGNORE
-            );
+        if(message.receive(MPI_ANY_SOURCE, MPI_ANY_TAG, _director_comm)) {
+            global_done = message.data<int>();
         }
 
         // Expect sum to be 0 unless at least one director is dead

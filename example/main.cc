@@ -8,13 +8,14 @@
 #include "./frog.h"
 
 int main(int argc, char *argv[]) {
-    // scope ensures classes are destroyed before MPI_Finalize
-    MPI_Init(&argc, &argv); {
 
-        // Attach a big enough message buffer to run the simulation
-        int buffer_size = 50000;
-        void *buffer = ::operator new(buffer_size);
-        MPI_Buffer_attach(buffer, buffer_size);
+    ActorModel::Director::initialize(&argc, &argv);
+
+    // scope ensures classes are destroyed before Director::finalize
+    {
+
+        // Set a big enough message buffer to run the simulation
+        ActorModel::Director::set_buffer_size(50000);
 
         /**
          * Create a director.
@@ -84,7 +85,9 @@ int main(int argc, char *argv[]) {
 
         director.run();
 
-    } MPI_Finalize();
+    }
+
+    ActorModel::Director::finalize();
 
     return EXIT_SUCCESS;
 }

@@ -133,11 +133,8 @@ void test_poison_pill(void) {
 }
 
 int main(int argc, char *argv[]) {
-    MPI_Init(&argc, &argv);
-
-    void* buffer = ::operator new(1000);
-    MPI_Buffer_attach(buffer, 1000);
-
+    Director::initialize(&argc, &argv);
+    Director::set_buffer_size(1000);
 
     INIT_SQT();
 
@@ -145,5 +142,5 @@ int main(int argc, char *argv[]) {
 
     RUN_TEST(test_poison_pill);
 
-    MPI_Finalize();
+    Director::finalize();
 }
