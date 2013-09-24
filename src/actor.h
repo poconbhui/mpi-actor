@@ -44,7 +44,7 @@ public:
     virtual ~Actor(){}
 
     // The main function that must be overloaded when defining a new actor.
-    virtual void main()=0;
+    virtual void main(void)=0;
 
 
     // Request this actor dies.
