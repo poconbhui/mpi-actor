@@ -67,6 +67,11 @@ public:
         MPI_Comm_free(&_director_comm);
     }
 
+
+    /*
+     * Setup MPI library and buffer.
+     */
+
     static void initialize(int* argc, char **argv[]) {
         MPI_Init(argc, argv);
     }
@@ -85,6 +90,7 @@ public:
         buffer = ::operator new(buffer_size);
         MPI_Buffer_attach(buffer, buffer_size);
     }
+
 
     // Define a root director to easily run stuff on just one process
     bool is_root(void) {
@@ -120,6 +126,7 @@ public:
         _actor_distributer.register_child<T>();
     }
 
+
     // Get the current load the director is under. That is,
     // the current number of actors it's managing.
     int get_load(void) {
@@ -150,7 +157,6 @@ public:
             Message::send<int>(i, END, is_ended, _director_comm);
         }
     }
-
 
 
     // Run the process for the requested number of ticks.
@@ -187,6 +193,7 @@ public:
 
 
 private:
+
     /*
      * Global state management
      */
