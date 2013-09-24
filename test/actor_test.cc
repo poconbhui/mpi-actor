@@ -116,7 +116,7 @@ void test_compound_message(void) {
     MPI_Comm comm;
     MPI_Comm_dup(MPI_COMM_WORLD, &comm);
 
-    ActorMessage message;
+    CompoundMessage message;
 
     int rank, size;
     MPI_Comm_rank(comm, &rank);
