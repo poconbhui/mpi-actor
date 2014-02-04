@@ -36,8 +36,8 @@ public:
                         ActorModel::Id test = _cell_list[i];
 
                         if(
-                            test.rank == cell_id.rank &&
-                            test.id == cell_id.id
+                            test.rank() == cell_id.rank() &&
+                            test.gid() == cell_id.gid()
                         ) {
                             cellnum = i;
 
@@ -105,7 +105,7 @@ public:
                     // Request cell data
                     Cell::PopulationDataRequest request;
                     request.tag = Cell::POPULATION_DATA;
-                    request.reply = get_id();
+                    request.reply = id();
                     send_message<Cell::PopulationDataRequest>(
                         _cell_list[i], request, Cell::POPULATION_DATA
                     );
@@ -179,7 +179,7 @@ public:
         // Generate and initialize frogs
         for(int i=0; i<_initial_frog_count; i++) {
             Frog::Coords coords = {0.0, 0.0};
-            ActorModel::Id my_id = get_id();
+            ActorModel::Id my_id = id();
 
             ActorModel::Id frog_id = Frog::give_birth_and_initialize(
                 this, &_cell_list[0], _cell_list_size, coords, my_id
